@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from envit5.core.settings import Settings
-
-
 TEST_API_KEY = "test-key-abc123"
 
 
