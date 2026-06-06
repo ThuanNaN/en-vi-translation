@@ -8,8 +8,7 @@ FROM nvcr.io/nvidia/tritonserver:${TRITON_VERSION}
 # CPU-only PyTorch backs transformers' .generate(); ONNX Runtime (via Optimum) does the
 # actual encoder/decoder matmuls. sentencepiece + sacremoses are required by the Marian
 # (OPUS-MT) tokenizers.
-RUN python3 -m pip install --no-cache-dir --upgrade pip \
- && python3 -m pip install --no-cache-dir \
+RUN python3 -m pip install --no-cache-dir \
       torch --index-url https://download.pytorch.org/whl/cpu \
  && python3 -m pip install --no-cache-dir \
       "transformers>=4.40,<5" \
