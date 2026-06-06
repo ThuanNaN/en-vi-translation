@@ -39,8 +39,8 @@ stress: ## Stress-test both models and print latency report (needs: pip install 
 eval: ## Evaluate translation quality with BLEU/chrF on 1000 HF samples (needs: pip install -e '.[eval]')
 	python scripts/stresstest.py --url localhost:8000 \
 		--eval-dataset talmp/en-vi-translation \
-		--eval-samples 1000 \
-		--concurrency 8
+		--eval-samples 5000 \
+		--concurrency 20
 
 observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
