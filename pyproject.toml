@@ -33,6 +33,7 @@ client = [
 dev = [
     "ruff>=0.4",
     "pytest>=8",
+    "httpx>=0.27",
 ]
 # Quality-evaluation deps: load HF datasets + compute BLEU score.
 eval = [
@@ -44,6 +45,10 @@ eval = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
 
 [tool.ruff]
 line-length = 100
