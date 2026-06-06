@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build build-app export up api-up api-down logs ps ready smoke stress eval clean all
+.PHONY: help build build-app export up api-up api-down down remove logs api-logs worker-logs ps ready smoke stress eval observe clean all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -35,6 +35,12 @@ remove: ## Stop and remove containers, volumes, and networks
 logs: ## Tail Triton logs
 	$(COMPOSE) logs -f triton
 
+api-logs: ## Tail API logs
+	$(COMPOSE) logs -f api
+
+worker-logs: ## Tail Celery worker logs
+	$(COMPOSE) logs -f worker
+
 ps: ## Show service status
 	$(COMPOSE) ps
 
@@ -48,7 +54,7 @@ smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
 stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
 	python scripts/stresstest.py --url localhost:8000
 
-eval: ## Evaluate translation quality with BLEU/chrF on 1000 HF samples (needs: pip install -e '.[eval]')
+eval: ## Evaluate translation quality with BLEU/chrF on 5000 HF samples (needs: pip install -e '.[eval]')
 	python scripts/stresstest.py --url localhost:8000 \
 		--eval-dataset talmp/en-vi-translation \
 		--eval-samples 5000 \
@@ -60,4 +66,4 @@ observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail,
 clean: ## Delete exported ONNX artifacts
 	rm -rf model_repository/*/1/onnx
 
-all: build export up observe ## Build image, export models, then start all services
+all: build build-app export up api-up observe ## Build all images, export models, start all services
