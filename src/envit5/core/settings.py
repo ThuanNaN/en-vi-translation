@@ -6,9 +6,9 @@ Every field can be overridden with an environment variable prefixed ``ENVIT5_``
 
 from __future__ import annotations
 from functools import lru_cache
+from typing import Annotated
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from typing import Annotated
 
 
 class Settings(BaseSettings):

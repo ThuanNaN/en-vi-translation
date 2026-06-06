@@ -109,12 +109,15 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     image: envit5/app:local
+    ports:
+      - "9091:9091"   # Prometheus metrics
     environment:
       ENVIT5_TRITON_HTTP_URL: triton:8000
       ENVIT5_TRITON_GRPC_URL: triton:8001
       ENVIT5_REDIS_URL: redis://redis:6379/0
       ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
       ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
     command:
       - celery
       - -A

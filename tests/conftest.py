@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from envit5.core import settings as _settings_mod
 
 TEST_API_KEY = "test-key-abc123"
 
@@ -18,7 +19,6 @@ def override_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ENVIT5_API_KEYS", TEST_API_KEY)
 
     # Clear the lru_cache so each test starts with a fresh Settings instance.
-    from envit5.core import settings as _settings_mod
     _settings_mod.get_settings.cache_clear()
     yield
     _settings_mod.get_settings.cache_clear()

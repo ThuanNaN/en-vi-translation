@@ -1,14 +1,53 @@
 """FastAPI application: POST /translate and GET /jobs/{job_id}."""
 from __future__ import annotations
 
+import time
 from typing import Annotated
+import py3langid
 from celery.result import AsyncResult
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from starlette.middleware.base import BaseHTTPMiddleware
+
 from envit5.api.models import JobResponse, TranslateRequest, TranslateResponse
+from envit5.core.metrics import (
+    http_request_duration_seconds,
+    http_requests_total,
+    make_metrics_asgi_app,
+)
 from envit5.core.settings import get_settings
 from envit5.worker.tasks import translate_task
 
+
+def _normalize_path(path: str) -> str:
+    """Collapse dynamic path segments to avoid high-cardinality labels."""
+    if path.startswith("/jobs/"):
+        return "/jobs/{job_id}"
+    return path
+
+
+class _MetricsMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path == "/metrics":
+            return await call_next(request)
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration = time.perf_counter() - start
+        path = _normalize_path(request.url.path)
+        http_requests_total.labels(
+            method=request.method,
+            endpoint=path,
+            status_code=str(response.status_code),
+        ).inc()
+        http_request_duration_seconds.labels(
+            method=request.method,
+            endpoint=path,
+        ).observe(duration)
+        return response
+
+
 app = FastAPI(title="EN↔VI Translation API", version="0.1.0")
+app.add_middleware(_MetricsMiddleware)
+app.mount("/metrics", make_metrics_asgi_app())
 
 
 def _require_api_key(x_api_key: Annotated[str | None, Header()] = None) -> str:
@@ -19,8 +58,6 @@ def _require_api_key(x_api_key: Annotated[str | None, Header()] = None) -> str:
 
 
 def _detect_direction(text: str) -> tuple[str, str]:
-    import py3langid  # imported lazily to avoid loading startup overhead when unused
-
     lang, _ = py3langid.classify(text)
     if lang == "en":
         return "en", "vi"

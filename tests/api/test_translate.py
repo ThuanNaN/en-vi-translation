@@ -123,8 +123,8 @@ def test_celery_task_is_dispatched(client: TestClient, auth_headers: dict) -> No
         json={"text": "Hello", "source": "en", "target": "vi"},
         headers=auth_headers,
     )
-    client._mock_task.delay.assert_called_once()
-    call_kwargs = client._mock_task.delay.call_args
+    client.mock_task.delay.assert_called_once()
+    call_kwargs = client.mock_task.delay.call_args
     # The worker must receive the original text.
     args, kwargs = call_kwargs
     all_args = list(args) + list(kwargs.values())
