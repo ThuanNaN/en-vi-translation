@@ -109,7 +109,7 @@
             "uid": "prometheus"
           },
           "expr": "nv_inference_request_success",
-          "legendFormat": "Success {{instance}}",
+          "legendFormat": "Success {{model}}",
           "refId": "A"
         },
         {
@@ -118,7 +118,7 @@
             "uid": "prometheus"
           },
           "expr": "nv_inference_request_failure",
-          "legendFormat": "Failure {{instance}}",
+          "legendFormat": "Failure {{model}}",
           "refId": "B"
         }
       ],
@@ -126,113 +126,62 @@
       "type": "timeseries"
     },
     {
-      "cards": {},
-      "color": {
-        "cardColor": "#b4ff00",
-        "colorScale": "sqrt",
-        "colorScheme": "interpolateReds",
-        "exponent": 0.5,
-        "mode": "spectrum"
-      },
-      "dataFormat": "timeseries",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "scaleDistribution": {
-              "type": "linear"
-            }
-          }
-        },
-        "overrides": []
-      },
+      "type": "timeseries",
+      "title": "Compute Utilization (Compute / Request Time)",
+      "description": "Fraction of total request time spent on model inference. 1.0 = all time is compute; lower values indicate queue or network overhead.",
+      "id": 7,
       "gridPos": {
         "h": 9,
         "w": 12,
         "x": 12,
         "y": 0
       },
-      "heatmap": {},
-      "hideZeroBuckets": false,
-      "highlightCards": true,
-      "id": 7,
-      "legend": {
-        "show": false
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
       },
-      "options": {
-        "calculate": true,
-        "calculation": {},
-        "cellGap": 2,
-        "cellValues": {},
-        "color": {
-          "exponent": 0.5,
-          "fill": "#b4ff00",
-          "mode": "scheme",
-          "reverse": false,
-          "scale": "exponential",
-          "scheme": "Reds",
-          "steps": 128
-        },
-        "exemplars": {
-          "color": "rgba(255,0,255,0.7)"
-        },
-        "filterValues": {
-          "le": 1e-9
-        },
-        "legend": {
-          "show": false
-        },
-        "rowsFrame": {
-          "layout": "auto"
-        },
-        "showValue": "never",
-        "tooltip": {
-          "mode": "single",
-          "showColorScale": false,
-          "yHistogram": false
-        },
-        "yAxis": {
-          "axisPlacement": "left",
-          "reverse": false,
-          "unit": "short"
-        }
-      },
-      "pluginVersion": "11.1.0",
-      "reverseYBuckets": false,
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "sum(increase(nv_inference_load_ratio_bucket[1m])) by (le)",
-          "legendFormat": "",
+          "expr": "(sum(rate(nv_inference_compute_input_duration_us[$__rate_interval])) by (model) + sum(rate(nv_inference_compute_infer_duration_us[$__rate_interval])) by (model) + sum(rate(nv_inference_compute_output_duration_us[$__rate_interval])) by (model)) / sum(rate(nv_inference_request_duration_us[$__rate_interval])) by (model)",
+          "legendFormat": "{{model}}",
           "refId": "A"
         }
       ],
-      "title": "Load Ratio  (Total Time / Compute Time)",
-      "tooltip": {
-        "show": true,
-        "showHistogram": false
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
       },
-      "type": "heatmap",
-      "xAxis": {
-        "show": true
-      },
-      "yAxis": {
-        "format": "short",
-        "logBase": 1,
-        "show": true
-      },
-      "yBucketBound": "auto"
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      }
     },
     {
       "datasource": {
@@ -248,7 +197,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Queue Time (ms)",
+            "axisLabel": "Queue Time (ms / exec)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
@@ -290,7 +239,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -319,8 +268,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(nv_inference_queue_duration_us[30s]) / 1000",
-          "legendFormat": "{{instance}}",
+          "expr": "sum(rate(nv_inference_queue_duration_us[$__rate_interval])) by (model) / sum(rate(nv_inference_exec_count[$__rate_interval])) by (model) / 1000",
+          "legendFormat": "{{model}}",
           "refId": "A"
         }
       ],
@@ -341,7 +290,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "Compute Time (ms)",
+            "axisLabel": "Compute Time (ms / exec)",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "drawStyle": "line",
@@ -383,7 +332,7 @@
               }
             ]
           },
-          "unit": "short"
+          "unit": "ms"
         },
         "overrides": []
       },
@@ -412,8 +361,8 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "rate(nv_inference_compute_duration_us[30s]) / 1000",
-          "legendFormat": "{{instance}}",
+          "expr": "sum(rate(nv_inference_compute_infer_duration_us[$__rate_interval])) by (model) / sum(rate(nv_inference_exec_count[$__rate_interval])) by (model) / 1000",
+          "legendFormat": "{{model}}",
           "refId": "A"
         }
       ],
