@@ -18,3 +18,4 @@ model_repository/**/onnx/
 .pytest_cache/
 .ruff_cache/
 *.log
+.vscode
