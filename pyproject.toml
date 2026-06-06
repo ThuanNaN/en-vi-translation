@@ -34,12 +34,14 @@ api = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "py3langid>=0.2",
+    "prometheus-client>=0.20",
 ]
 worker = [
     "celery[redis]>=5.3",
     "redis>=5.0",
     "tritonclient[http]>=2.40",
     "numpy>=1.24",
+    "prometheus-client>=0.20",
 ]
 dev = [
     "envit5[api,worker,client]",
