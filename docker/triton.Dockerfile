@@ -12,7 +12,7 @@ RUN python3 -m pip install --no-cache-dir \
       torch --index-url https://download.pytorch.org/whl/cpu \
  && python3 -m pip install --no-cache-dir \
       "transformers>=4.40,<5" \
-      "optimum[onnxruntime]>=1.20" \
+      "optimum[onnxruntime-gpu]>=1.20" \
       "sentencepiece>=0.1.99" \
       "sacremoses>=0.1.1"
 
