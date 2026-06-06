@@ -5,11 +5,11 @@
 ARG TRITON_VERSION=24.12-py3
 FROM nvcr.io/nvidia/tritonserver:${TRITON_VERSION}
 
-# CPU-only PyTorch backs transformers' .generate(); ONNX Runtime (via Optimum) does the
-# actual encoder/decoder matmuls. sentencepiece + sacremoses are required by the Marian
-# (OPUS-MT) tokenizers.
+# CUDA-enabled PyTorch is required for Optimum IO binding (output buffer allocation on GPU).
+# cu124 wheels are compatible with the CUDA 12.6 runtime in the Triton 24.12 base image.
+# sentencepiece + sacremoses are required by the Marian (OPUS-MT) tokenizers.
 RUN python3 -m pip install --no-cache-dir \
-      torch --index-url https://download.pytorch.org/whl/cpu \
+      torch --index-url https://download.pytorch.org/whl/cu124 \
  && python3 -m pip install --no-cache-dir \
       "transformers>=4.40,<5" \
       "optimum[onnxruntime-gpu]>=1.20" \
