@@ -13,31 +13,28 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 import numpy as np
 import tritonclient.http as httpclient
 
-SAMPLE_TEXTS: dict[str, list[str]] = {
-    "translator_en_vi": [
-        "Hello, how are you today?",
-        "The weather is nice outside.",
-        "Machine translation is improving rapidly.",
-        "Neural networks have transformed natural language processing.",
-        "Please translate this sentence into Vietnamese.",
-        "The quick brown fox jumps over the lazy dog.",
-        "Science and technology are advancing at an unprecedented pace.",
-    ],
-    "translator_vi_en": [
-        "Xin chào, hôm nay bạn thế nào?",
-        "Thời tiết hôm nay rất đẹp.",
-        "Dịch máy đang được cải thiện nhanh chóng.",
-        "Mạng nơ-ron đã thay đổi xử lý ngôn ngữ tự nhiên.",
-        "Vui lòng dịch câu này sang tiếng Anh.",
-        "Khoa học và công nghệ đang tiến bộ với tốc độ chưa từng có.",
-        "Học máy là một nhánh của trí tuệ nhân tạo.",
-    ],
+_DATA_DIR = Path(__file__).parent.parent / "data" / "tests"
+
+_DATA_FILES: dict[str, str] = {
+    "translator_en_vi": "en2vi.txt",
+    "translator_vi_en": "vi2en.txt",
 }
 
-MODELS = list(SAMPLE_TEXTS.keys())
+MODELS = list(_DATA_FILES.keys())
+
+
+def _load_texts(model_name: str) -> list[str]:
+    path = _DATA_DIR / _DATA_FILES[model_name]
+    if not path.exists():
+        raise FileNotFoundError(f"Data file not found: {path}")
+    lines = [ln.rstrip("\n") for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    if not lines:
+        raise ValueError(f"Data file is empty: {path}")
+    return lines
 
 _thread_local = threading.local()
 
@@ -69,7 +66,7 @@ def _worker(url: str, model_name: str, texts: list[str], idx: int) -> tuple[floa
 
 
 def run_stress(url: str, model_name: str, n_requests: int, concurrency: int) -> dict:
-    texts = SAMPLE_TEXTS[model_name]
+    texts = _load_texts(model_name)
     latencies: list[float] = []
     errors: list[str] = []
 
@@ -170,8 +167,11 @@ def main() -> None:
         if not client.is_model_ready(model_name):
             print(f"[skip] {model_name} not ready", file=sys.stderr)
             continue
+        texts = _load_texts(model_name)
+        src = _DATA_DIR / _DATA_FILES[model_name]
+        src_label = str(src) if src.exists() and src.read_text(encoding="utf-8").strip() else "fallback samples"
         print(
-            f"[stress] {model_name}: {args.requests} requests, concurrency={args.concurrency}",
+            f"[stress] {model_name}: {args.requests} requests, concurrency={args.concurrency}, data={src_label} ({len(texts)} lines)",
             file=sys.stderr,
             flush=True,
         )
