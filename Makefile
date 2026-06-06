@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build export up down logs ps ready smoke clean all
+.PHONY: help build export up down logs ps ready smoke stress clean all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -32,6 +32,9 @@ ready: ## Probe Triton readiness endpoint
 
 smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
 	python scripts/smoke_test.py --url localhost:8000
+
+stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
+	python scripts/stresstest.py --url localhost:8000
 
 clean: ## Delete exported ONNX artifacts
 	rm -rf model_repository/*/1/onnx
