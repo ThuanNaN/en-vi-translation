@@ -34,6 +34,13 @@ dev = [
     "ruff>=0.4",
     "pytest>=8",
 ]
+# Quality-evaluation deps: load HF datasets + compute BLEU score.
+eval = [
+    "datasets>=2.18",
+    "sacrebleu>=2.4",
+    "tritonclient[http]>=2.40",
+    "numpy>=1.24",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

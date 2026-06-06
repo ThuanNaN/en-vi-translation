@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build export up observe down logs ps ready smoke stress clean all
+.PHONY: help build export up observe down logs ps ready smoke stress eval clean all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -35,6 +35,12 @@ smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
 
 stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
 	python scripts/stresstest.py --url localhost:8000
+
+eval: ## Evaluate translation quality with BLEU/chrF on 1000 HF samples (needs: pip install -e '.[eval]')
+	python scripts/stresstest.py --url localhost:8000 \
+		--eval-dataset talmp/en-vi-translation \
+		--eval-samples 1000 \
+		--concurrency 8
 
 observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
