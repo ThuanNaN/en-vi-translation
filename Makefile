@@ -12,7 +12,7 @@ build: ## Build the Triton image (installs transformers/optimum/torch-cpu)
 
 export: ## Export HF checkpoints to ONNX into model_repository/ (run once before `up`)
 	$(COMPOSE) run --rm --no-deps -w /workspace triton \
-		python scripts/export_models.py --model-repository /models
+		python3 scripts/export_models.py --model-repository /models
 
 up: ## Start Triton + Redis in the background
 	$(COMPOSE) up -d triton redis
