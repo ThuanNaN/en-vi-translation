@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build export up down logs ps ready smoke stress clean all
+.PHONY: help build export up observe down logs ps ready smoke stress clean all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -36,7 +36,10 @@ smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
 stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
 	python scripts/stresstest.py --url localhost:8000
 
+observe: ## Start Prometheus, Grafana, Loki and Promtail (metrics + logs)
+	$(COMPOSE) up -d prometheus grafana loki promtail
+
 clean: ## Delete exported ONNX artifacts
 	rm -rf model_repository/*/1/onnx
 
-all: build export up ## Build image, export models, then start services
+all: build export up observe ## Build image, export models, then start all services

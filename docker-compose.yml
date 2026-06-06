@@ -69,6 +69,86 @@ services:
       timeout: 3s
       retries: 5
 
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 256m
+    depends_on:
+      - triton
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.1.0
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docker/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    volumes:
+      - ./docker/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+    depends_on:
+      - loki
+
 volumes:
   hf-cache:
   redis-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:
