@@ -12,7 +12,7 @@ Run it inside the Triton image, which already has the heavy deps::
     make export
     # equivalently:
     docker compose run --rm --no-deps -w /workspace triton \
-        python scripts/export_models.py --model-repository /models
+        python3 scripts/export_models.py --model-repository /models
 
 Or locally in a Python 3.10-3.12 venv after `pip install -e '.[export]'`.
 
