@@ -20,6 +20,9 @@ up: ## Start Triton + Redis in the background
 down: ## Stop and remove containers
 	$(COMPOSE) down
 
+remove: ## Stop and remove containers, volumes, and networks
+	$(COMPOSE) down -v --rmi all --remove-orphans
+
 logs: ## Tail Triton logs
 	$(COMPOSE) logs -f triton
 
