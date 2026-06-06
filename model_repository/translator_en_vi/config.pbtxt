@@ -27,14 +27,14 @@ dynamic_batching {
 instance_group [
   {
     count: 1
-    kind: KIND_CPU
+    kind: KIND_GPU
   }
 ]
 
 parameters [
   {
     key: "max_new_tokens"
-    value: { string_value: "256" }
+    value: { string_value: "512" }
   },
   {
     key: "num_beams"

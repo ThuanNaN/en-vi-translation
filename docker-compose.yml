@@ -25,6 +25,18 @@ services:
       - "8000:8000"   # HTTP / REST inference
       - "8001:8001"   # gRPC inference
       - "8002:8002"   # Prometheus metrics
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8g
+        reservations:
+          cpus: "1.0"
+          memory: 2g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     shm_size: "1gb"
     healthcheck:
       test:
@@ -43,12 +55,230 @@ services:
       - "6379:6379"
     volumes:
       - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
 
+  api:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: envit5/app:local
+    ports:
+      - "8080:8080"
+    environment:
+      ENVIT5_TRITON_HTTP_URL: triton:8000
+      ENVIT5_TRITON_GRPC_URL: triton:8001
+      ENVIT5_REDIS_URL: redis://redis:6379/0
+      ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
+      ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
+      ENVIT5_API_KEYS: ${ENVIT5_API_KEYS:-changeme}
+    command: ["uvicorn", "envit5.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      triton:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/docs')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: envit5/app:local
+    ports:
+      - "9091:9091"   # Prometheus metrics
+    environment:
+      ENVIT5_TRITON_HTTP_URL: triton:8000
+      ENVIT5_TRITON_GRPC_URL: triton:8001
+      ENVIT5_REDIS_URL: redis://redis:6379/0
+      ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
+      ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
+    command:
+      - celery
+      - -A
+      - envit5.worker.celery_app:celery_app
+      - worker
+      - --loglevel=info
+      - -c
+      - "4"
+    depends_on:
+      triton:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui.Dockerfile
+    image: envit5/ui:local
+    ports:
+      - "7860:7860"
+    environment:
+      ENVIT5_API_URL: http://api:8080
+      ENVIT5_API_KEY: ${ENVIT5_API_KEYS:-changeme}
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    command:
+      - '--path.rootfs=/host'
+    ports:
+      - "9100:9100"
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.4.0-4.5.0-ubuntu22.04
+    ports:
+      - "9400:9400"
+    cap_add:
+      - SYS_ADMIN
+    runtime: nvidia
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+          devices:
+            - capabilities: [gpu]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 256m
+    depends_on:
+      - triton
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.1.0
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docker/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    volumes:
+      - ./docker/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+    depends_on:
+      - loki
+
 volumes:
   hf-cache:
   redis-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:

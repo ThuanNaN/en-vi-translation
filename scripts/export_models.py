@@ -12,7 +12,7 @@ Run it inside the Triton image, which already has the heavy deps::
     make export
     # equivalently:
     docker compose run --rm --no-deps -w /workspace triton \
-        python scripts/export_models.py --model-repository /models
+        python3 scripts/export_models.py --model-repository /models
 
 Or locally in a Python 3.10-3.12 venv after `pip install -e '.[export]'`.
 
@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-
 from optimum.onnxruntime import ORTModelForSeq2SeqLM
 from transformers import AutoTokenizer
 
@@ -43,7 +42,7 @@ def export_one(triton_name: str, hf_id: str, repo_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[export] {hf_id} -> {out_dir}", flush=True)
 
-    model = ORTModelForSeq2SeqLM.from_pretrained(hf_id, export=True)
+    model = ORTModelForSeq2SeqLM.from_pretrained(hf_id, export=True, use_merged=True)
     model.save_pretrained(out_dir)
     AutoTokenizer.from_pretrained(hf_id).save_pretrained(out_dir)
 

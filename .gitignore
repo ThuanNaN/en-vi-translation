@@ -17,4 +17,8 @@ model_repository/**/onnx/
 .cache/
 .pytest_cache/
 .ruff_cache/
+
+# Downloaded HuggingFace datasets (cached locally, regenerate with make eval)
+data/raw/
 *.log
+.vscode

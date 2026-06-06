@@ -1,7 +1,9 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build export up down logs ps ready smoke clean all
+.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down down remove logs api-logs worker-logs ui-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
+
+API_KEY ?= changeme
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -10,18 +12,48 @@ help: ## Show available targets
 build: ## Build the Triton image (installs transformers/optimum/torch-cpu)
 	$(COMPOSE) build triton
 
+build-app: ## Build the API + worker image
+	$(COMPOSE) build api
+
+build-ui: ## Build the Gradio UI image
+	$(COMPOSE) build ui
+
 export: ## Export HF checkpoints to ONNX into model_repository/ (run once before `up`)
 	$(COMPOSE) run --rm --no-deps -w /workspace triton \
-		python scripts/export_models.py --model-repository /models
+		python3 scripts/export_models.py --model-repository /models
 
 up: ## Start Triton + Redis in the background
 	$(COMPOSE) up -d triton redis
 
+api-up: ## Start API + Celery worker (requires: make up)
+	$(COMPOSE) up -d api worker
+
+api-down: ## Stop API + worker only
+	$(COMPOSE) stop api worker
+
+ui-up: ## Start Gradio demo UI (requires: make api-up)
+	$(COMPOSE) up -d ui
+
+ui-down: ## Stop Gradio demo UI
+	$(COMPOSE) stop ui
+
 down: ## Stop and remove containers
 	$(COMPOSE) down
 
+remove: ## Stop and remove containers, volumes, and networks
+	$(COMPOSE) down -v --rmi all --remove-orphans
+
 logs: ## Tail Triton logs
 	$(COMPOSE) logs -f triton
+
+api-logs: ## Tail API logs
+	$(COMPOSE) logs -f api
+
+worker-logs: ## Tail Celery worker logs
+	$(COMPOSE) logs -f worker
+
+ui-logs: ## Tail Gradio UI logs
+	$(COMPOSE) logs -f ui
 
 ps: ## Show service status
 	$(COMPOSE) ps
@@ -33,7 +65,33 @@ ready: ## Probe Triton readiness endpoint
 smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
 	python scripts/smoke_test.py --url localhost:8000
 
-clean: ## Delete exported ONNX artifacts
-	rm -rf model_repository/*/1/onnx
+stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
+	python scripts/stresstest.py --url localhost:8000
 
-all: build export up ## Build image, export models, then start services
+eval: ## Evaluate translation quality with BLEU/chrF on 5000 HF samples (needs: pip install -e '.[eval]')
+	python scripts/stresstest.py --url localhost:8000 \
+		--eval-dataset talmp/en-vi-translation \
+		--eval-samples 5000 \
+		--concurrency 20
+
+app-stress: ## Stress-test the FastAPI app (needs: make api-up; override key with API_KEY=mykey)
+	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY)
+
+app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (needs: make api-up, pip install -e '.[eval]')
+	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY) \
+		--eval-dataset talmp/en-vi-translation \
+		--eval-samples 5000 \
+		--concurrency 20
+
+observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
+	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
+
+lint: ## Run ruff + pylint over src/ and tests/
+	ruff check .
+	pylint src/ tests/
+
+clean: ## Delete exported ONNX artifacts (uses Docker to handle root-owned files)
+	$(COMPOSE) run --rm --no-deps -w /workspace triton \
+		sh -c 'rm -rf /models/*/1/onnx'
+
+all: build build-app export up api-up observe ## Build all images, export models, start all services

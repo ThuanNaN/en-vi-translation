@@ -5,11 +5,10 @@ Every field can be overridden with an environment variable prefixed ``ENVIT5_``
 """
 
 from __future__ import annotations
-
 from functools import lru_cache
-
+from typing import Annotated
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -31,7 +30,7 @@ class Settings(BaseSettings):
     hf_model_vi_en: str = "Helsinki-NLP/opus-mt-vi-en"
 
     # --- Generation ---
-    max_new_tokens: int = 256
+    max_new_tokens: int = 512
     num_beams: int = 1
 
     # --- Queue / cache (used from Phase 3 onward) ---
@@ -41,7 +40,8 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int = 86400
 
     # --- API (Phase 3) ---
-    api_keys: list[str] = Field(default_factory=list)
+    # NoDecode: skip pydantic-settings' JSON-decode pass so the CSV validator handles it.
+    api_keys: Annotated[list[str], NoDecode] = Field(default_factory=list)
     request_timeout_seconds: float = 30.0
 
     @field_validator("api_keys", mode="before")
