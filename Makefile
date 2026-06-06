@@ -81,7 +81,8 @@ app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (nee
 	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY) \
 		--eval-dataset talmp/en-vi-translation \
 		--eval-samples 5000 \
-		--concurrency 20
+		--concurrency 20 \
+		--results-file results/app_eval_en_vi.json
 
 observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
