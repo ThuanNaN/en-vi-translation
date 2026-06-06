@@ -11,7 +11,6 @@ determines which language pair this model instance translates.
 
 import json
 import os
-
 import numpy as np
 import triton_python_backend_utils as pb_utils
 from optimum.onnxruntime import ORTModelForSeq2SeqLM

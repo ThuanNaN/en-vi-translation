@@ -25,7 +25,6 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-
 from optimum.onnxruntime import ORTModelForSeq2SeqLM
 from transformers import AutoTokenizer
 
