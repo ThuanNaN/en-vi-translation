@@ -1,7 +1,9 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build build-app export up api-up api-down down remove logs api-logs worker-logs ps ready smoke stress eval observe clean all
+.PHONY: help build build-app export up api-up api-down down remove logs api-logs worker-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
+
+API_KEY ?= changeme
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -60,8 +62,21 @@ eval: ## Evaluate translation quality with BLEU/chrF on 5000 HF samples (needs: 
 		--eval-samples 5000 \
 		--concurrency 20
 
+app-stress: ## Stress-test the FastAPI app (needs: make api-up; override key with API_KEY=mykey)
+	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY)
+
+app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (needs: make api-up, pip install -e '.[eval]')
+	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY) \
+		--eval-dataset talmp/en-vi-translation \
+		--eval-samples 5000 \
+		--concurrency 20
+
 observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
+
+lint: ## Run ruff + pylint over src/ and tests/
+	ruff check .
+	pylint src/ tests/
 
 clean: ## Delete exported ONNX artifacts
 	rm -rf model_repository/*/1/onnx

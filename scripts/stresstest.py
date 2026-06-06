@@ -1,36 +1,64 @@
-"""Stress test: hammer Triton with concurrent translation requests and print a latency report.
+"""Stress test and quality evaluation for translation endpoints.
 
+Triton backend (direct, default):
     pip install -e '.[client]'
     python scripts/stresstest.py --url localhost:8000 --requests 200 --concurrency 16
     python scripts/stresstest.py --direction en-vi --output report.txt
 
-Quality evaluation (BLEU) using a HuggingFace dataset:
+FastAPI app backend (POST /translate + poll GET /jobs/{id}):
+    python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key changeme
+    python scripts/stresstest.py --target app --api-key changeme --direction en-vi
 
+Quality evaluation (BLEU) using a HuggingFace dataset:
     pip install -e '.[eval]'
     python scripts/stresstest.py --eval-dataset talmp/en-vi-translation --eval-samples 1000
-    python scripts/stresstest.py --eval-dataset talmp/en-vi-translation --eval-samples 1000 --direction en-vi
+    python scripts/stresstest.py --target app --api-key changeme \\
+        --eval-dataset talmp/en-vi-translation --eval-samples 1000
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import statistics
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Callable
 
-import numpy as np
-import tritonclient.http as httpclient
-
-_DATA_DIR = Path(__file__).parent.parent / "data" / "tests"
 _RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
-_DATA_FILES: dict[str, str] = {
-    "translator_en_vi": "en2vi.txt",
-    "translator_vi_en": "vi2en.txt",
+# Built-in sample sentences used as stress-test input (cycled over n_requests).
+_SAMPLE_TEXTS: dict[str, list[str]] = {
+    "translator_en_vi": [
+        "Hello, how are you?",
+        "The weather is nice today.",
+        "I would like to order a coffee, please.",
+        "Where is the nearest hospital?",
+        "Thank you very much for your help.",
+        "Can you speak more slowly?",
+        "What time does the train depart?",
+        "I need to find a pharmacy.",
+        "The food here is delicious.",
+        "How much does this cost?",
+    ],
+    "translator_vi_en": [
+        "Xin chào, bạn có khỏe không?",
+        "Thời tiết hôm nay rất đẹp.",
+        "Tôi muốn đặt một ly cà phê.",
+        "Bệnh viện gần nhất ở đâu?",
+        "Cảm ơn bạn rất nhiều vì đã giúp đỡ.",
+        "Bạn có thể nói chậm hơn không?",
+        "Tàu khởi hành lúc mấy giờ?",
+        "Tôi cần tìm một hiệu thuốc.",
+        "Món ăn ở đây rất ngon.",
+        "Cái này giá bao nhiêu?",
+    ],
 }
 
 # Column names in the HF dataset for each direction.
@@ -40,30 +68,35 @@ _DATASET_COLS: dict[str, tuple[str, str]] = {
     "translator_vi_en": ("output", "input"),
 }
 
-MODELS = list(_DATA_FILES.keys())
+# Maps internal model name → API direction string for the app backend.
+_MODEL_TO_DIRECTION: dict[str, str] = {
+    "translator_en_vi": "en-vi",
+    "translator_vi_en": "vi-en",
+}
+
+MODELS = list(_SAMPLE_TEXTS.keys())
 
 
-def _load_texts(model_name: str) -> list[str]:
-    path = _DATA_DIR / _DATA_FILES[model_name]
-    if not path.exists():
-        raise FileNotFoundError(f"Data file not found: {path}")
-    lines = [ln.rstrip("\n") for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    if not lines:
-        raise ValueError(f"Data file is empty: {path}")
-    return lines
-
+# ---------------------------------------------------------------------------
+# Triton backend
+# ---------------------------------------------------------------------------
 
 _thread_local = threading.local()
 
 
-def _get_client(url: str) -> httpclient.InferenceServerClient:
+def _get_triton_client(url: str):
     if not hasattr(_thread_local, "client"):
+        import tritonclient.http as httpclient  # type: ignore[import-untyped]
+
         _thread_local.client = httpclient.InferenceServerClient(url=url)
     return _thread_local.client
 
 
-def _translate_one(url: str, model_name: str, text: str) -> str:
-    client = _get_client(url)
+def _translate_one_triton(url: str, model_name: str, text: str) -> str:
+    import numpy as np
+    import tritonclient.http as httpclient  # type: ignore[import-untyped]
+
+    client = _get_triton_client(url)
     inp = httpclient.InferInput("INPUT_TEXT", [1, 1], "BYTES")
     inp.set_data_from_numpy(np.array([[text]], dtype=object))
     out = httpclient.InferRequestedOutput("OUTPUT_TEXT")
@@ -72,24 +105,109 @@ def _translate_one(url: str, model_name: str, text: str) -> str:
     return value.decode("utf-8") if isinstance(value, (bytes, bytearray)) else str(value)
 
 
-def _worker(url: str, model_name: str, texts: list[str], idx: int) -> tuple[float, str | None]:
+def _make_triton_translate_fn(url: str, model_name: str) -> Callable[[str], str]:
+    def fn(text: str) -> str:
+        return _translate_one_triton(url, model_name, text)
+
+    return fn
+
+
+# ---------------------------------------------------------------------------
+# App backend (FastAPI: POST /translate → poll GET /jobs/{job_id})
+# ---------------------------------------------------------------------------
+
+def _translate_one_app(
+    api_url: str,
+    api_key: str,
+    direction: str,
+    text: str,
+    poll_interval: float = 0.5,
+    timeout: float = 60.0,
+) -> str:
+    headers = {"Content-Type": "application/json", "X-API-Key": api_key}
+    payload = json.dumps({"text": text, "direction": direction}).encode()
+
+    req = urllib.request.Request(
+        f"{api_url}/translate", data=payload, headers=headers, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            job_id = json.loads(resp.read())["job_id"]
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode(errors="replace")
+        raise RuntimeError(f"POST /translate failed {exc.code}: {body}") from exc
+
+    poll_url = f"{api_url}/jobs/{job_id}"
+    poll_headers = {"X-API-Key": api_key}
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        req = urllib.request.Request(poll_url, headers=poll_headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode(errors="replace")
+            raise RuntimeError(f"GET /jobs/{job_id} failed {exc.code}: {body}") from exc
+        status = data["status"]
+        if status == "done":
+            return data["translation"]
+        if status == "failed":
+            raise RuntimeError(f"Translation failed: {data.get('error')}")
+        time.sleep(poll_interval)
+
+    raise TimeoutError(f"Job {job_id} did not complete within {timeout}s")
+
+
+def _make_app_translate_fn(
+    api_url: str,
+    api_key: str,
+    direction: str,
+    poll_interval: float,
+    timeout: float,
+) -> Callable[[str], str]:
+    def fn(text: str) -> str:
+        return _translate_one_app(api_url, api_key, direction, text, poll_interval, timeout)
+
+    return fn
+
+
+def _check_app_ready(api_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{api_url}/docs", timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Generic stress / eval runners
+# ---------------------------------------------------------------------------
+
+def _worker(
+    translate_fn: Callable[[str], str], texts: list[str], idx: int
+) -> tuple[float, str | None]:
     text = texts[idx % len(texts)]
     t0 = time.perf_counter()
     try:
-        _translate_one(url, model_name, text)
+        translate_fn(text)
         return time.perf_counter() - t0, None
     except Exception as exc:
         return time.perf_counter() - t0, str(exc)
 
 
-def run_stress(url: str, model_name: str, n_requests: int, concurrency: int) -> dict:
-    texts = _load_texts(model_name)
+def run_stress(
+    translate_fn: Callable[[str], str],
+    model_name: str,
+    n_requests: int,
+    concurrency: int,
+) -> dict:
+    texts = _SAMPLE_TEXTS[model_name]
     latencies: list[float] = []
     errors: list[str] = []
 
     t_start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        futures = [pool.submit(_worker, url, model_name, texts, i) for i in range(n_requests)]
+        futures = [pool.submit(_worker, translate_fn, texts, i) for i in range(n_requests)]
         for fut in as_completed(futures):
             latency, err = fut.result()
             latencies.append(latency)
@@ -145,20 +263,19 @@ def _load_eval_pairs(
 
 
 def _eval_worker(
-    url: str,
-    model_name: str,
+    translate_fn: Callable[[str], str],
     text: str,
 ) -> tuple[str, float, str | None]:
     t0 = time.perf_counter()
     try:
-        hyp = _translate_one(url, model_name, text)
+        hyp = translate_fn(text)
         return hyp, time.perf_counter() - t0, None
     except Exception as exc:
         return "", time.perf_counter() - t0, str(exc)
 
 
 def run_eval(
-    url: str,
+    translate_fn: Callable[[str], str],
     model_name: str,
     dataset_name: str,
     n_samples: int,
@@ -190,8 +307,7 @@ def run_eval(
     t_start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as pool:
         future_to_idx = {
-            pool.submit(_eval_worker, url, model_name, src): i
-            for i, src in enumerate(sources)
+            pool.submit(_eval_worker, translate_fn, src): i for i, src in enumerate(sources)
         }
         done = 0
         for fut in as_completed(future_to_idx):
@@ -269,6 +385,8 @@ def _append_stress_section(lines: list[str], r: dict, W: int) -> None:
     lats = r["latencies"]
 
     lines.append(f"Model        : {r['model']}")
+    if r.get("backend"):
+        lines.append(f"Backend      : {r['backend']}")
     lines.append(f"Requests     : {n}  (concurrency={r['concurrency']})")
     lines.append(f"Succeeded    : {n_ok}   Failed: {n_err}")
     lines.append(f"Duration     : {r['total_seconds']:.2f} s")
@@ -297,6 +415,8 @@ def _append_eval_section(lines: list[str], r: dict, W: int) -> None:
     lats = r["latencies"]
 
     lines.append(f"Model        : {r['model']}")
+    if r.get("backend"):
+        lines.append(f"Backend      : {r['backend']}")
     lines.append(f"Dataset      : {r['dataset']}")
     lines.append(f"Samples      : {n}  (concurrency={r['concurrency']})")
     lines.append(f"Succeeded    : {n_ok}   Failed: {n_err}")
@@ -340,7 +460,36 @@ def _append_eval_section(lines: list[str], r: dict, W: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--url", default="localhost:8000", help="Triton HTTP endpoint")
+
+    # Backend selection.
+    parser.add_argument(
+        "--target",
+        choices=["triton", "app"],
+        default="triton",
+        help="Backend to test: 'triton' (direct Triton HTTP) or 'app' (FastAPI via POST /translate). Default: triton",
+    )
+
+    # Triton args.
+    triton_grp = parser.add_argument_group("triton backend")
+    triton_grp.add_argument("--url", default="localhost:8000", help="Triton HTTP endpoint (host:port)")
+
+    # App args.
+    app_grp = parser.add_argument_group("app backend")
+    app_grp.add_argument("--api-url", default="http://localhost:8080", help="FastAPI base URL")
+    app_grp.add_argument("--api-key", default="changeme", help="X-API-Key header value")
+    app_grp.add_argument(
+        "--poll-interval",
+        type=float,
+        default=0.5,
+        help="Seconds between job-status polls in app mode (default: 0.5)",
+    )
+    app_grp.add_argument(
+        "--job-timeout",
+        type=float,
+        default=60.0,
+        help="Seconds to wait for a single job to complete in app mode (default: 60)",
+    )
+
     parser.add_argument("--requests", type=int, default=100, help="Total requests per model (stress mode)")
     parser.add_argument("--concurrency", type=int, default=8, help="Concurrent workers")
     parser.add_argument(
@@ -380,11 +529,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    client = httpclient.InferenceServerClient(url=args.url)
-    if not client.is_server_ready():
-        print(f"Triton at {args.url} is not ready.", file=sys.stderr)
-        raise SystemExit(1)
-
     model_map = {
         "en-vi": ["translator_en_vi"],
         "vi-en": ["translator_vi_en"],
@@ -392,39 +536,71 @@ def main() -> None:
     }
     selected = model_map[args.direction]
 
+    if args.target == "triton":
+        try:
+            import tritonclient.http as httpclient  # type: ignore[import-untyped]
+        except ImportError:
+            print("tritonclient not found. Install with: pip install -e '.[client]'", file=sys.stderr)
+            raise SystemExit(1)
+
+        client = httpclient.InferenceServerClient(url=args.url)
+        if not client.is_server_ready():
+            print(f"Triton at {args.url} is not ready.", file=sys.stderr)
+            raise SystemExit(1)
+
+        def _is_ready(model_name: str) -> bool:
+            return client.is_model_ready(model_name)
+
+        def _make_fn(model_name: str) -> Callable[[str], str]:
+            return _make_triton_translate_fn(args.url, model_name)
+
+        backend_label = f"triton ({args.url})"
+
+    else:  # app
+        if not _check_app_ready(args.api_url):
+            print(f"FastAPI app at {args.api_url} is not reachable.", file=sys.stderr)
+            raise SystemExit(1)
+
+        def _is_ready(_model_name: str) -> bool:
+            return True  # app doesn't expose per-model readiness
+
+        def _make_fn(model_name: str) -> Callable[[str], str]:
+            direction = _MODEL_TO_DIRECTION[model_name]
+            return _make_app_translate_fn(
+                args.api_url, args.api_key, direction, args.poll_interval, args.job_timeout
+            )
+
+        backend_label = f"app ({args.api_url})"
+
     results = []
     for model_name in selected:
-        if not client.is_model_ready(model_name):
+        if not _is_ready(model_name):
             print(f"[skip] {model_name} not ready", file=sys.stderr)
             continue
 
+        translate_fn = _make_fn(model_name)
+
         if args.eval_dataset:
-            results.append(
-                run_eval(
-                    url=args.url,
-                    model_name=model_name,
-                    dataset_name=args.eval_dataset,
-                    n_samples=args.eval_samples,
-                    split=args.eval_split,
-                    seed=args.eval_seed,
-                    concurrency=args.concurrency,
-                )
+            result = run_eval(
+                translate_fn=translate_fn,
+                model_name=model_name,
+                dataset_name=args.eval_dataset,
+                n_samples=args.eval_samples,
+                split=args.eval_split,
+                seed=args.eval_seed,
+                concurrency=args.concurrency,
             )
         else:
-            texts = _load_texts(model_name)
-            src = _DATA_DIR / _DATA_FILES[model_name]
-            src_label = (
-                str(src)
-                if src.exists() and src.read_text(encoding="utf-8").strip()
-                else "fallback samples"
-            )
             print(
-                f"[stress] {model_name}: {args.requests} requests, "
-                f"concurrency={args.concurrency}, data={src_label} ({len(texts)} lines)",
+                f"[stress] {model_name} ({backend_label}): {args.requests} requests, "
+                f"concurrency={args.concurrency}, samples={len(_SAMPLE_TEXTS[model_name])}",
                 file=sys.stderr,
                 flush=True,
             )
-            results.append(run_stress(args.url, model_name, args.requests, args.concurrency))
+            result = run_stress(translate_fn, model_name, args.requests, args.concurrency)
+
+        result["backend"] = backend_label
+        results.append(result)
 
     if not results:
         print("No models available.", file=sys.stderr)
