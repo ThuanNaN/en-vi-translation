@@ -27,7 +27,7 @@ class TritonPythonModel:
             entry = params.get(name)
             return entry["string_value"] if entry else default
 
-        self.max_new_tokens = int(_param("max_new_tokens", "256"))
+        self.max_new_tokens = int(_param("max_new_tokens", "512"))
         self.num_beams = int(_param("num_beams", "1"))
 
         onnx_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "onnx")

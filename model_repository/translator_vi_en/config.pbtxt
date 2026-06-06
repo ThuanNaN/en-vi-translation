@@ -34,7 +34,7 @@ instance_group [
 parameters [
   {
     key: "max_new_tokens"
-    value: { string_value: "256" }
+    value: { string_value: "512" }
   },
   {
     key: "num_beams"

@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     hf_model_vi_en: str = "Helsinki-NLP/opus-mt-vi-en"
 
     # --- Generation ---
-    max_new_tokens: int = 256
+    max_new_tokens: int = 512
     num_beams: int = 1
 
     # --- Queue / cache (used from Phase 3 onward) ---
