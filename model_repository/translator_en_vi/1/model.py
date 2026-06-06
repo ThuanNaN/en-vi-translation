@@ -12,6 +12,7 @@ determines which language pair this model instance translates.
 import json
 import os
 import numpy as np
+import onnxruntime as ort
 import triton_python_backend_utils as pb_utils
 from optimum.onnxruntime import ORTModelForSeq2SeqLM
 from transformers import AutoTokenizer
@@ -36,8 +37,22 @@ class TritonPythonModel:
                 "Export the model first with `make export` (scripts/export_models.py)."
             )
 
+        device_id = int(args.get("model_instance_device_id", "0"))
+        if "CUDAExecutionProvider" in ort.get_available_providers():
+            provider = "CUDAExecutionProvider"
+            provider_options = {"device_id": device_id}
+            pb_utils.Logger.log_info(f"ORT using CUDAExecutionProvider on device {device_id}")
+        else:
+            provider = "CPUExecutionProvider"
+            provider_options = {}
+            pb_utils.Logger.log_warn("CUDAExecutionProvider unavailable, falling back to CPU")
+
         self.tokenizer = AutoTokenizer.from_pretrained(onnx_dir)
-        self.model = ORTModelForSeq2SeqLM.from_pretrained(onnx_dir)
+        self.model = ORTModelForSeq2SeqLM.from_pretrained(
+            onnx_dir,
+            provider=provider,
+            provider_options=provider_options,
+        )
 
         output_config = pb_utils.get_output_config_by_name(model_config, "OUTPUT_TEXT")
         self.output_dtype = pb_utils.triton_string_to_numpy(output_config["data_type"])
