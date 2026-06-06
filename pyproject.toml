@@ -44,6 +44,7 @@ worker = [
 dev = [
     "envit5[api,worker,client]",
     "ruff>=0.4",
+    "pylint>=3.2",
     "pytest>=8",
     "httpx>=0.27",
 ]
@@ -65,3 +66,33 @@ addopts = "-v"
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.pylint.main]
+py-version = "3.10"
+jobs = 0  # auto-detect CPU count
+recursive = true
+
+[tool.pylint."messages control"]
+# Disable checks covered by ruff or irrelevant to this project
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-instance-attributes",
+    "fixme",
+    "import-error",            # optional deps not always installed
+    "no-name-in-module",       # same reason
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.design]
+max-args = 10
+max-attributes = 10
+
+[tool.pylint.similarities]
+min-similarity-lines = 10
+ignore-imports = true
