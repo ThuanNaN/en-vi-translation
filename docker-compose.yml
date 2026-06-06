@@ -1,0 +1,54 @@
+name: envit5
+
+services:
+  triton:
+    build:
+      context: .
+      dockerfile: docker/triton.Dockerfile
+      args:
+        TRITON_VERSION: ${TRITON_VERSION:-24.12-py3}
+    image: envit5/triton:local
+    command: >
+      tritonserver
+      --model-repository=/models
+      --model-control-mode=none
+    working_dir: /workspace
+    environment:
+      # Used by scripts/export_models.py when run inside this container (`make export`).
+      ENVIT5_HF_MODEL_EN_VI: ${ENVIT5_HF_MODEL_EN_VI:-Helsinki-NLP/opus-mt-en-vi}
+      ENVIT5_HF_MODEL_VI_EN: ${ENVIT5_HF_MODEL_VI_EN:-Helsinki-NLP/opus-mt-vi-en}
+    volumes:
+      - ./model_repository:/models
+      - ./scripts:/workspace/scripts
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"   # HTTP / REST inference
+      - "8001:8001"   # gRPC inference
+      - "8002:8002"   # Prometheus metrics
+    shm_size: "1gb"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready')
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  hf-cache:
+  redis-data:

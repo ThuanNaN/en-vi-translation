@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "envit5"
+version = "0.1.0"
+description = "EN<->VI Neural Machine Translation served on Triton Inference Server with a Celery/Redis queue"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+]
+
+[project.optional-dependencies]
+# Heavy ML deps, only needed to export HF checkpoints to ONNX.
+# Prefer running the export inside the Triton image (see docker/triton.Dockerfile),
+# which already has a compatible Python. Install locally only on Python 3.10-3.12.
+export = [
+    "transformers>=4.40,<5",
+    "optimum[onnxruntime]>=1.20",
+    "torch",
+    "sentencepiece>=0.1.99",
+    "sacremoses>=0.1.1",
+]
+# Client deps for talking to Triton (smoke tests now, the Celery worker later).
+client = [
+    "tritonclient[http]>=2.40",
+    "numpy>=1.24",
+]
+dev = [
+    "ruff>=0.4",
+    "pytest>=8",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

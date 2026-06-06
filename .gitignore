@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+
+# Exported ONNX artifacts are large build outputs, not source. Regenerate with `make export`.
+# The model.py and config.pbtxt next to them stay tracked.
+model_repository/**/onnx/
+
+# Caches
+.cache/
+.pytest_cache/
+.ruff_cache/
+*.log
