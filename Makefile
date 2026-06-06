@@ -78,7 +78,8 @@ lint: ## Run ruff + pylint over src/ and tests/
 	ruff check .
 	pylint src/ tests/
 
-clean: ## Delete exported ONNX artifacts
-	rm -rf model_repository/*/1/onnx
+clean: ## Delete exported ONNX artifacts (uses Docker to handle root-owned files)
+	$(COMPOSE) run --rm --no-deps -w /workspace triton \
+		sh -c 'rm -rf /models/*/1/onnx'
 
 all: build build-app export up api-up observe ## Build all images, export models, start all services
