@@ -42,7 +42,7 @@ def export_one(triton_name: str, hf_id: str, repo_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"[export] {hf_id} -> {out_dir}", flush=True)
 
-    model = ORTModelForSeq2SeqLM.from_pretrained(hf_id, export=True)
+    model = ORTModelForSeq2SeqLM.from_pretrained(hf_id, export=True, use_merged=True)
     model.save_pretrained(out_dir)
     AutoTokenizer.from_pretrained(hf_id).save_pretrained(out_dir)
 
