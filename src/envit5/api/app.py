@@ -4,10 +4,10 @@ from __future__ import annotations
 import time
 from typing import Annotated
 import py3langid
+import redis as redis_lib
 from celery.result import AsyncResult
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from starlette.middleware.base import BaseHTTPMiddleware
-
 from envit5.api.models import JobResponse, TranslateRequest, TranslateResponse
 from envit5.core.metrics import (
     http_request_duration_seconds,
@@ -16,6 +16,16 @@ from envit5.core.metrics import (
 )
 from envit5.core.settings import get_settings
 from envit5.worker.tasks import translate_task
+
+_JOB_KEY_PREFIX = "jobtrack:"
+
+
+def _job_key(job_id: str) -> str:
+    return f"{_JOB_KEY_PREFIX}{job_id}"
+
+
+def _redis() -> redis_lib.Redis:
+    return redis_lib.from_url(get_settings().redis_url)
 
 
 def _normalize_path(path: str) -> str:
@@ -79,6 +89,9 @@ async def submit_translation(
         src, tgt = _detect_direction(req.text)
 
     task = translate_task.delay(req.text, src, tgt)
+    # Record the job ID so get_job can distinguish "queued but not started yet"
+    # from "never submitted" — Celery returns PENDING+result=None for both.
+    _redis().set(_job_key(task.id), "1", ex=get_settings().cache_ttl_seconds)
     return TranslateResponse(job_id=task.id)
 
 
@@ -89,9 +102,12 @@ async def get_job(
 ) -> JobResponse:
     result = AsyncResult(job_id)
 
-    # Celery returns PENDING + result=None for unknown IDs — treat as 404.
     if result.status == "PENDING" and result.result is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+        # Celery uses PENDING+result=None for both "queued" and "unknown".
+        # Check our submission marker to tell the difference.
+        if not _redis().exists(_job_key(job_id)):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found.")
+        return JobResponse(job_id=job_id, status="pending")
 
     if result.status in ("PENDING", "RETRY"):
         return JobResponse(job_id=job_id, status="pending")
