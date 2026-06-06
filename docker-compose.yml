@@ -69,6 +69,42 @@ services:
       timeout: 3s
       retries: 5
 
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    command:
+      - '--path.rootfs=/host'
+    ports:
+      - "9100:9100"
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.4.0-4.5.0-ubuntu22.04
+    ports:
+      - "9400:9400"
+    cap_add:
+      - SYS_ADMIN
+    runtime: nvidia
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+          devices:
+            - capabilities: [gpu]
+
   prometheus:
     image: prom/prometheus:v2.53.0
     ports:
@@ -95,6 +131,7 @@ services:
     ports:
       - "3000:3000"
     environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
     volumes:
       - grafana-data:/var/lib/grafana
