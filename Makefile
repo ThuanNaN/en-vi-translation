@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build build-app export up api-up api-down down remove logs api-logs worker-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
+.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down down remove logs api-logs worker-logs ui-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
 
 API_KEY ?= changeme
 
@@ -15,6 +15,9 @@ build: ## Build the Triton image (installs transformers/optimum/torch-cpu)
 build-app: ## Build the API + worker image
 	$(COMPOSE) build api
 
+build-ui: ## Build the Gradio UI image
+	$(COMPOSE) build ui
+
 export: ## Export HF checkpoints to ONNX into model_repository/ (run once before `up`)
 	$(COMPOSE) run --rm --no-deps -w /workspace triton \
 		python3 scripts/export_models.py --model-repository /models
@@ -27,6 +30,12 @@ api-up: ## Start API + Celery worker (requires: make up)
 
 api-down: ## Stop API + worker only
 	$(COMPOSE) stop api worker
+
+ui-up: ## Start Gradio demo UI (requires: make api-up)
+	$(COMPOSE) up -d ui
+
+ui-down: ## Stop Gradio demo UI
+	$(COMPOSE) stop ui
 
 down: ## Stop and remove containers
 	$(COMPOSE) down
@@ -42,6 +51,9 @@ api-logs: ## Tail API logs
 
 worker-logs: ## Tail Celery worker logs
 	$(COMPOSE) logs -f worker
+
+ui-logs: ## Tail Gradio UI logs
+	$(COMPOSE) logs -f ui
 
 ps: ## Show service status
 	$(COMPOSE) ps

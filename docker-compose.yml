@@ -140,6 +140,28 @@ services:
           cpus: "0.5"
           memory: 512m
 
+  ui:
+    build:
+      context: .
+      dockerfile: docker/ui.Dockerfile
+    image: envit5/ui:local
+    ports:
+      - "7860:7860"
+    environment:
+      ENVIT5_API_URL: http://api:8080
+      ENVIT5_API_KEY: ${ENVIT5_API_KEYS:-changeme}
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+
   node-exporter:
     image: quay.io/prometheus/node-exporter:latest
     command:
