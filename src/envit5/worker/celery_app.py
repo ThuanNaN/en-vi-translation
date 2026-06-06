@@ -26,6 +26,11 @@ def _make_celery() -> Celery:
 
 celery_app = _make_celery()
 
+# Must come AFTER celery_app is assigned so that tasks.py can import
+# `celery_app` from this module without hitting a partially-initialised
+# namespace (circular-import safe this way).
+celery_app.autodiscover_tasks(["envit5.worker"])
+
 
 @worker_init.connect
 def _start_metrics_server(**_kwargs):
