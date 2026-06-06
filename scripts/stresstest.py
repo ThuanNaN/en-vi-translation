@@ -35,9 +35,9 @@ _DATA_FILES: dict[str, str] = {
 
 # Column names in the HF dataset for each direction.
 _DATASET_COLS: dict[str, tuple[str, str]] = {
-    # talmp/en-vi-translation uses "input"/"output"; generic HF translation datasets use "en"/"vi"
+    # talmp/en-vi-translation uses "input"/"output";
     "translator_en_vi": ("input", "output"),
-    "translator_vi_en": ("vi", "en"),
+    "translator_vi_en": ("output", "input"),
 }
 
 MODELS = list(_DATA_FILES.keys())
