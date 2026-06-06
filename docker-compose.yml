@@ -28,11 +28,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "8.0"
-          memory: 16g
+          cpus: "4.0"
+          memory: 8g
         reservations:
-          cpus: "2.0"
-          memory: 4g
+          cpus: "1.0"
+          memory: 2g
           devices:
             - driver: nvidia
               count: 1
@@ -68,6 +68,74 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: envit5/app:local
+    ports:
+      - "8080:8080"
+    environment:
+      ENVIT5_TRITON_HTTP_URL: triton:8000
+      ENVIT5_TRITON_GRPC_URL: triton:8001
+      ENVIT5_REDIS_URL: redis://redis:6379/0
+      ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
+      ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
+      ENVIT5_API_KEYS: ${ENVIT5_API_KEYS:-changeme}
+    command: ["uvicorn", "envit5.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    depends_on:
+      triton:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/docs')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    image: envit5/app:local
+    environment:
+      ENVIT5_TRITON_HTTP_URL: triton:8000
+      ENVIT5_TRITON_GRPC_URL: triton:8001
+      ENVIT5_REDIS_URL: redis://redis:6379/0
+      ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
+      ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
+    command:
+      - celery
+      - -A
+      - envit5.worker.celery_app:celery_app
+      - worker
+      - --loglevel=info
+      - -c
+      - "4"
+    depends_on:
+      triton:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
 
   node-exporter:
     image: quay.io/prometheus/node-exporter:latest

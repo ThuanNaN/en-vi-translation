@@ -28,7 +28,14 @@ def test_get_job_invalid_api_key_returns_401_or_403(
 # ---------------------------------------------------------------------------
 
 def test_get_pending_job(client: TestClient, auth_headers: dict, pending_job_id: str) -> None:
-    resp = client.get(f"/jobs/{pending_job_id}", headers=auth_headers)
+    # Celery marks a task STARTED once a worker picks it up (task_track_started=True).
+    # Without a live broker we mock this state to distinguish "known job" from "unknown".
+    with patch("envit5.api.app.AsyncResult") as mock_ar:
+        mock_ar.return_value.status = "STARTED"
+        mock_ar.return_value.result = None
+
+        resp = client.get(f"/jobs/{pending_job_id}", headers=auth_headers)
+
     assert resp.status_code == 200
     body = resp.json()
     assert body["job_id"] == pending_job_id
@@ -78,7 +85,12 @@ def test_get_unknown_job_returns_404(client: TestClient, auth_headers: dict) -> 
 # ---------------------------------------------------------------------------
 
 def test_job_response_schema(client: TestClient, auth_headers: dict, pending_job_id: str) -> None:
-    resp = client.get(f"/jobs/{pending_job_id}", headers=auth_headers)
+    with patch("envit5.api.app.AsyncResult") as mock_ar:
+        mock_ar.return_value.status = "STARTED"
+        mock_ar.return_value.result = None
+
+        resp = client.get(f"/jobs/{pending_job_id}", headers=auth_headers)
+
     body = resp.json()
     assert "job_id" in body
     assert "status" in body

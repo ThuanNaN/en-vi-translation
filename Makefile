@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build export up observe down logs ps ready smoke stress eval clean all
+.PHONY: help build build-app export up api-up api-down logs ps ready smoke stress eval clean all
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -10,12 +10,21 @@ help: ## Show available targets
 build: ## Build the Triton image (installs transformers/optimum/torch-cpu)
 	$(COMPOSE) build triton
 
+build-app: ## Build the API + worker image
+	$(COMPOSE) build api
+
 export: ## Export HF checkpoints to ONNX into model_repository/ (run once before `up`)
 	$(COMPOSE) run --rm --no-deps -w /workspace triton \
 		python3 scripts/export_models.py --model-repository /models
 
 up: ## Start Triton + Redis in the background
 	$(COMPOSE) up -d triton redis
+
+api-up: ## Start API + Celery worker (requires: make up)
+	$(COMPOSE) up -d api worker
+
+api-down: ## Stop API + worker only
+	$(COMPOSE) stop api worker
 
 down: ## Stop and remove containers
 	$(COMPOSE) down
