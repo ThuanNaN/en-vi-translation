@@ -79,6 +79,11 @@ def _detect_direction(text: str) -> tuple[str, str]:
     )
 
 
+@app.get("/health")
+async def health() -> dict:
+    return {"status": "ok"}
+
+
 @app.post("/translate", response_model=TranslateResponse, status_code=status.HTTP_202_ACCEPTED)
 async def submit_translation(
     req: TranslateRequest,

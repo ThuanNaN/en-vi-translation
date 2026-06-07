@@ -22,3 +22,4 @@ model_repository/**/onnx/
 data/raw/
 *.log
 .vscode
+results/
