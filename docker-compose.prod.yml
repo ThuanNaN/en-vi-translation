@@ -1,0 +1,23 @@
+# Override file: replaces locally-built images with pre-built GHCR images.
+# Usage:
+#   IMAGE_TAG=v0.1.0 make prod-pull
+#   IMAGE_TAG=v0.1.0 make prod-up
+#
+# Or directly:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
+
+name: envit5
+
+services:
+  triton:
+    image: ghcr.io/thuannan/envit5-triton:${IMAGE_TAG:-v0.1.0}
+
+  api:
+    image: ghcr.io/thuannan/envit5-app:${IMAGE_TAG:-v0.1.0}
+
+  worker:
+    image: ghcr.io/thuannan/envit5-app:${IMAGE_TAG:-v0.1.0}
+
+  ui:
+    image: ghcr.io/thuannan/envit5-ui:${IMAGE_TAG:-v0.1.0}

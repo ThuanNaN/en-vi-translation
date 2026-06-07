@@ -1,9 +1,11 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose
 
-.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down down remove logs api-logs worker-logs ui-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
+.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down down remove logs api-logs worker-logs ui-logs ps ready smoke stress eval app-stress app-eval observe clean lint all prod-pull prod-up prod-down
 
-API_KEY ?= changeme
+API_KEY   ?= changeme
+IMAGE_TAG ?= v0.1.0
+PROD_COMPOSE := docker compose -f docker-compose.yml -f docker-compose.prod.yml
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -96,3 +98,12 @@ clean: ## Delete exported ONNX artifacts (uses Docker to handle root-owned files
 		sh -c 'rm -rf /models/*/1/onnx'
 
 all: build build-app export up api-up observe ## Build all images, export models, start all services
+
+prod-pull: ## Pull all pre-built images from GHCR (IMAGE_TAG=v0.1.0)
+	IMAGE_TAG=$(IMAGE_TAG) $(PROD_COMPOSE) pull triton api worker ui
+
+prod-up: ## Start all services from GHCR images without building (IMAGE_TAG=v0.1.0)
+	IMAGE_TAG=$(IMAGE_TAG) $(PROD_COMPOSE) up -d --no-build
+
+prod-down: ## Stop and remove prod containers
+	$(PROD_COMPOSE) down
