@@ -19,6 +19,11 @@ _DIRECTION_MAP = {
     "VI → EN": "vi-en",
 }
 
+_BACKEND_MAP = {
+    "NMT — Triton (fast)": None,
+    "LLM — vLLM (Qwen)": "llm",
+}
+
 _EXAMPLES = [
     ["Hello, how are you today?", "EN → VI"],
     ["The weather is beautiful this morning.", "EN → VI"],
@@ -34,7 +39,7 @@ def _headers() -> dict[str, str]:
 
 
 def translate(
-    text: str, direction: str
+    text: str, direction: str, backend: str
 ) -> Generator[tuple[str, str], None, None]:
     text = text.strip()
     if not text:
@@ -47,6 +52,9 @@ def translate(
     dir_value = _DIRECTION_MAP.get(direction)
     if dir_value:
         payload["direction"] = dir_value
+    model_value = _BACKEND_MAP.get(backend)
+    if model_value:
+        payload["model"] = model_value
 
     try:
         resp = requests.post(
@@ -98,15 +106,21 @@ with gr.Blocks(title="EN↔VI Translation") as demo:
     gr.Markdown(
         """
 # EN ↔ VI Neural Machine Translation
-Powered by Helsinki-NLP/opus-mt via Triton Inference Server + Celery
+Powered by Helsinki-NLP/opus-mt (Triton) and Qwen (vLLM) via Celery
 """
     )
 
-    direction = gr.Radio(
-        choices=list(_DIRECTION_MAP.keys()),
-        value="Auto-detect",
-        label="Direction",
-    )
+    with gr.Row():
+        direction = gr.Radio(
+            choices=list(_DIRECTION_MAP.keys()),
+            value="Auto-detect",
+            label="Direction",
+        )
+        backend = gr.Radio(
+            choices=list(_BACKEND_MAP.keys()),
+            value="NMT — Triton (fast)",
+            label="Backend",
+        )
 
     with gr.Row():
         input_box = gr.Textbox(
@@ -134,7 +148,7 @@ Powered by Helsinki-NLP/opus-mt via Triton Inference Server + Celery
 
     translate_btn.click(
         fn=translate,
-        inputs=[input_box, direction],
+        inputs=[input_box, direction, backend],
         outputs=[output_box, status_box],
     )
     clear_btn.click(
