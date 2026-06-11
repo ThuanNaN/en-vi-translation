@@ -20,19 +20,20 @@ from polyglot_gateway.worker.celery_app import celery_app
 from polyglot_gateway.worker.chunker import chunk_text, reassemble
 
 
-def _cache_key(src: str, tgt: str, text: str) -> str:
-    digest = hashlib.sha256(f"{src}-{tgt}:{text}".encode()).hexdigest()
+def _cache_key(src: str, tgt: str, text: str, model: str | None = None) -> str:
+    model_suffix = f":{model}" if model else ""
+    digest = hashlib.sha256(f"{src}-{tgt}{model_suffix}:{text}".encode()).hexdigest()
     return f"trans:{digest}"
 
 
 @celery_app.task(name="polyglot.translate", bind=True, max_retries=3, default_retry_delay=5)
-def translate_task(self, text: str, src: str, tgt: str) -> str:  # pylint: disable=too-many-locals
+def translate_task(self, text: str, src: str, tgt: str, model: str | None = None) -> str:  # pylint: disable=too-many-locals
     settings = get_settings()
-    backend_cfg = settings.backend_for(src, tgt)
-    direction = f"{src}-{tgt}"
+    backend_cfg = settings.backend_for(src, tgt, model)
+    direction = f"{src}-{tgt}" + (f":{model}" if model else "")
 
     r = redis.from_url(settings.redis_url)
-    key = _cache_key(src, tgt, text)
+    key = _cache_key(src, tgt, text, model)
 
     cached = r.get(key)
     if cached is not None:

@@ -142,7 +142,9 @@ services:
     environment:
       BACKENDS: >-
         {"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
-         "vi-en":{"type":"triton","url":"triton:8000","model_name":"translator_vi_en"}}
+         "vi-en":{"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
+         "en-vi:llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"English","tgt_lang":"Vietnamese"},
+         "vi-en:llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"Vietnamese","tgt_lang":"English"}}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -197,6 +199,42 @@ services:
         reservations:
           cpus: "0.05"
           memory: 64m
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model=Qwen/Qwen3.5-0.8B
+      - --max-model-len=4096
+      - --gpu-memory-utilization=0.5
+    ports:
+      - "8010:8000"   # OpenAI-compatible API (host 8010 avoids conflict with Triton 8000)
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          cpus: "1.0"
+          memory: 2g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "1gb"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 180s
 
   node-exporter:
     image: quay.io/prometheus/node-exporter:latest

@@ -10,6 +10,7 @@ class TranslateRequest(BaseModel):
     source: str | None = None
     target: str | None = None
     direction: str | None = None
+    model: str | None = None  # backend selector: None → default NMT, "llm" → vLLM
 
     model_config = {"str_strip_whitespace": True}
 
@@ -32,7 +33,7 @@ class TranslateRequest(BaseModel):
             # requires only a config change, not a code change.
             from polyglot_gateway.core.settings import get_settings  # noqa: PLC0415
             try:
-                get_settings().backend_for(self.source, self.target)
+                get_settings().backend_for(self.source, self.target, self.model)
             except ValueError as exc:
                 raise ValueError(str(exc)) from exc
 

@@ -11,5 +11,5 @@ def make_backend_client(config: BackendConfig) -> BackendClient:
     if config.type == "triton":
         return TritonBackendClient(url=config.url)
     if config.type == "vllm":
-        return VLLMBackendClient(url=config.url)
+        return VLLMBackendClient(url=config.url, src_lang=config.src_lang, tgt_lang=config.tgt_lang)
     raise ValueError(f"Unknown backend type: {config.type!r}")

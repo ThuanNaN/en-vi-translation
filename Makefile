@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose --project-directory . -f infra/compose/docker-compose.yml
 
-.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down gateway-up gateway-down down remove logs api-logs worker-logs ui-logs traefik-logs ps ready smoke stress bench eval app-stress app-eval observe clean lint all prod-pull prod-up prod-down
+.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down gateway-up gateway-down vllm-up vllm-down vllm-logs down remove logs api-logs worker-logs ui-logs traefik-logs ps ready smoke stress bench eval app-stress app-eval observe clean lint all prod-pull prod-up prod-down
 
 API_KEY     ?= changeme
 GATEWAY_TAG ?= v0.1.0
@@ -34,6 +34,15 @@ gateway-up: ## Start Traefik API gateway
 
 gateway-down: ## Stop Traefik API gateway
 	$(COMPOSE) stop traefik
+
+vllm-up: ## Start vLLM service — serves Qwen/Qwen3.5-0.8B on host port 8010 (requires GPU)
+	$(COMPOSE) up -d vllm
+
+vllm-down: ## Stop vLLM service
+	$(COMPOSE) stop vllm
+
+vllm-logs: ## Tail vLLM logs
+	$(COMPOSE) logs -f vllm
 
 api-up: ## Start API + Celery worker (requires: make up && make gateway-up)
 	$(COMPOSE) up -d api worker

@@ -93,7 +93,7 @@ async def submit_translation(
     if src is None:
         src, tgt = _detect_direction(req.text)
 
-    task = translate_task.delay(req.text, src, tgt)
+    task = translate_task.delay(req.text, src, tgt, req.model)
     # Record the job ID so get_job can distinguish "queued but not started yet"
     # from "never submitted" — Celery returns PENDING+result=None for both.
     _redis().set(_job_key(task.id), "1", ex=get_settings().cache_ttl_seconds)

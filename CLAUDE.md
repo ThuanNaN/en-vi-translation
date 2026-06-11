@@ -40,24 +40,31 @@ Makefile              # top-level orchestration (COMPOSE points to infra/compose
 
 ## Architecture (the parts that span files)
 
-- **Backend registry** — the gateway maps each language pair to a serving backend via
-  `BACKENDS` (JSON). `Settings.backend_for(src, tgt)` returns a `BackendConfig`; the
-  worker calls `make_backend_client(config)` to get the right `BackendClient` implementation.
-  Adding a new language pair or swapping Triton for vLLM on a pair = env var change, no code.
+- **Backend registry** — the gateway maps route keys to serving backends via `BACKENDS` (JSON).
+  Key format: `"src-tgt"` (default NMT) or `"src-tgt:model"` for named variants (e.g. `"en-vi:llm"`).
+  `Settings.backend_for(src, tgt, model=None)` resolves the key; the worker calls
+  `make_backend_client(config)` to get the right `BackendClient` implementation.
+  Adding a language pair or backend variant = env var change, no code.
 
   ```bash
-  # Example: en-vi on Triton, vi-en on vLLM
-  BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
-                    "vi-en":{"type":"vllm","url":"vllm:8000","model_name":"Helsinki-NLP/opus-mt-vi-en"}}'
+  # Triton NMT (default) + vLLM LLM routes for both directions:
+  BACKENDS='{
+    "en-vi":     {"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+    "vi-en":     {"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
+    "en-vi:llm": {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"English","tgt_lang":"Vietnamese"},
+    "vi-en:llm": {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"Vietnamese","tgt_lang":"English"}
+  }'
   ```
 
 - **BackendClient Protocol** — `services/gateway/src/polyglot_gateway/worker/backends/base.py`
   defines `BackendClient(Protocol)` with one method: `translate(text, model_name) -> str`.
-  `backends/triton.py` implements it with `tritonclient.http`; `backends/vllm.py` exists but
-  raises `NotImplementedError` (OpenAI-compatible API stub, not yet wired). `BackendConfig.type`
-  also accepts `"hf"` in the type annotation but `registry.py:make_backend_client()` raises
-  `ValueError` for it — `"hf"` is reserved for a future HuggingFace direct backend. Add new
-  backends by adding a file here and a case in `backends/registry.py:make_backend_client()`.
+  `backends/triton.py` implements it with `tritonclient.http`; `backends/vllm.py` implements it
+  with a plain `urllib.request` POST to `/v1/chat/completions` (no `openai` package needed).
+  `BackendConfig` carries optional `src_lang`/`tgt_lang` (e.g. `"English"`, `"Vietnamese"`)
+  which `VLLMBackendClient` uses to build the translation prompt; Triton ignores them.
+  `BackendConfig.type` also accepts `"hf"` but `registry.py:make_backend_client()` raises
+  `ValueError` for it — reserved for a future HuggingFace direct backend. Add new backends by
+  adding a file here and a case in `backends/registry.py:make_backend_client()`.
 
 - **Config is centralized** in `services/gateway/src/polyglot_gateway/core/settings.py`
   (pydantic-settings, no env prefix). Use `get_settings()` (the `@lru_cache` singleton)
@@ -82,8 +89,9 @@ Makefile              # top-level orchestration (COMPOSE points to infra/compose
   - `POST /translate` — returns `{"job_id": "..."}` (202 Accepted). Auth via `X-API-Key` header.
     Direction via `source`/`target` fields or the `direction` shorthand (`"en-vi"`); source
     auto-detected when both omitted (uses `py3langid`). `direction` and `source`/`target` are
-    mutually exclusive (422 if both). Validation calls `settings.backend_for()` — unknown
-    language pairs return 422.
+    mutually exclusive (422 if both). Optional `model` field selects a backend variant
+    (`"llm"` → vLLM, omit → default NMT). Validation calls `settings.backend_for()` — unknown
+    language-pair + model combinations return 422.
   - `GET /jobs/{id}` — poll for result. Status values: `pending`, `started`, `done`, `failed`.
 
 - **Long-text chunking** — `services/gateway/src/polyglot_gateway/worker/chunker.py` splits input
@@ -141,6 +149,9 @@ make ps         # show service status
 make api-down   # stop API + worker only
 make gateway-down # stop Traefik
 make ui-down    # stop Gradio UI
+make vllm-up    # start vLLM (Qwen/Qwen3.5-0.8B) on host port 8010 (requires GPU)
+make vllm-down  # stop vLLM
+make vllm-logs  # tail vLLM logs
 make down       # stop and remove containers
 make remove     # stop + remove containers, volumes, networks, and images
 make clean      # delete ONNX artifacts (runs inside Docker — root-owned files)
