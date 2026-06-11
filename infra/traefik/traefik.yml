@@ -1,0 +1,41 @@
+# Traefik static configuration
+# For HTTPS/Let's Encrypt in production, add a `websecure` entryPoint and
+# a `certificatesResolvers` block, then update routers to use entrypoints: websecure.
+
+api:
+  dashboard: true
+  insecure: true   # exposes dashboard on container port 8080 — dev only
+
+ping: {}           # enables /ping on the traefik entrypoint (port 8080) for healthcheck
+
+entryPoints:
+  web:
+    address: ":80"
+  metrics:                  # internal only — not mapped to a host port
+    address: ":8899"        # Prometheus reaches this via the Docker network
+
+providers:
+  docker:
+    exposedByDefault: false
+    network: polyglot_default  # all services share this compose-created network
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: true
+    addServicesLabels: true
+
+log:
+  level: INFO
+  format: json
+
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop
+      names:
+        X-API-Key: redact    # never write the actual key to the access log

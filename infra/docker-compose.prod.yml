@@ -1,0 +1,27 @@
+# Override file: replaces locally-built images with pre-built GHCR images.
+# Each service repo has its own independent version tag.
+# Usage:
+#   GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0 make prod-pull
+#   GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0 make prod-up
+#
+# Or directly:
+#   docker compose --project-directory . -f infra/compose/docker-compose.yml \
+#     -f infra/compose/docker-compose.prod.yml pull
+
+name: polyglot
+
+services:
+  triton:
+    image: ghcr.io/thuannan/polyglot-triton:${TRITON_TAG:-v0.1.0}
+
+  traefik:
+    image: traefik:v3.3
+
+  api:
+    image: ghcr.io/thuannan/polyglot-app:${GATEWAY_TAG:-v0.1.0}
+
+  worker:
+    image: ghcr.io/thuannan/polyglot-app:${GATEWAY_TAG:-v0.1.0}
+
+  ui:
+    image: ghcr.io/thuannan/polyglot-ui:${UI_TAG:-v0.1.0}

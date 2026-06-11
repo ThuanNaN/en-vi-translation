@@ -1,0 +1,36 @@
+# Service endpoint reference — informational, not loaded at runtime.
+#
+# Actual URLs are set via environment variables or configs/models.yaml.
+# Keep this file in sync with infra/docker-compose.yml for documentation purposes.
+
+services:
+  triton:
+    http: triton:8000
+    grpc: triton:8001
+    metrics: triton:8002
+    note: "Triton Inference Server — ONNX models for NMT"
+
+  vllm:
+    http: vllm:8000          # internal Docker network
+    host_port: 8010          # host binding (avoids conflict with Triton 8000)
+    note: "vLLM — OpenAI-compatible API, Qwen3.5-0.8B"
+
+  redis:
+    url: redis://redis:6379
+    databases:
+      0: "translation result cache (trans: prefix)"
+      1: "Celery broker"
+      2: "Celery result backend"
+
+  api:
+    internal: http://api:8080
+    external: http://localhost:80  # via Traefik
+
+  traefik:
+    http: 80
+    dashboard: 8888            # http://localhost:8888/dashboard/
+
+  observability:
+    prometheus: 9090
+    grafana: 3000              # admin/admin (dev)
+    loki: 3100

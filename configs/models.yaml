@@ -1,0 +1,43 @@
+# Model registry — add or remove backends without touching environment variables.
+#
+# This file is loaded automatically when the BACKENDS env var is not set.
+# Override the path with: BACKENDS_CONFIG=/path/to/models.yaml
+#
+# To add a new model:
+#   1. Append a new entry under `backends:` with a unique key.
+#   2. Set `type` to one of: triton | vllm | custom | hf
+#   3. Run `make build-app && make api-up` to pick up the change.
+#
+# Key format:
+#   "src-tgt"        — default backend for a language direction (e.g. en-vi)
+#   "src-tgt:model"  — variant override        (e.g. en-vi:llm)
+#   "model"          — direction-agnostic key  (e.g. llm → any direction)
+
+backends:
+  # ── Triton NMT models (ONNX, GPU-accelerated) ────────────────────────────
+  en-vi:
+    type: triton
+    url: triton:8000
+    model_name: translator_en_vi
+
+  vi-en:
+    type: triton
+    url: triton:8000
+    model_name: translator_vi_en
+
+  # ── vLLM (Qwen3.5-0.8B, direction-agnostic) ──────────────────────────────
+  # Activate with: POST /translate  {"model": "llm", ...}
+  # Requires: make vllm-up
+  llm:
+    type: vllm
+    url: vllm:8000
+    model_name: Qwen/Qwen3.5-0.8B
+
+  # ── Custom inference service example ─────────────────────────────────────
+  # Uncomment and point to your service to enable it.
+  # See inference/custom/example_service/ for a minimal reference implementation.
+  #
+  # custom-example:
+  #   type: custom
+  #   url: custom-service:9000
+  #   model_name: my-custom-model

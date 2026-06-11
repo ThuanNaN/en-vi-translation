@@ -1,98 +1,220 @@
+COMPOSE      := docker compose --project-directory . -f infra/docker-compose.yml
+PROD_COMPOSE := docker compose --project-directory . -f infra/docker-compose.yml -f infra/docker-compose.prod.yml
+
+API_KEY     ?= changeme
+GATEWAY_TAG ?= v0.1.0
+UI_TAG      ?= v0.1.0
+TRITON_TAG  ?= v0.1.0
+
 .DEFAULT_GOAL := help
-COMPOSE := docker compose
 
-.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down down remove logs api-logs worker-logs ui-logs ps ready smoke stress eval app-stress app-eval observe clean lint all
+.PHONY: \
+	help \
+	build build-triton build-app build-ui build-custom export clean \
+	infra-up infra-down gateway-up gateway-down ps down remove \
+	triton-up triton-down triton-logs triton-ready \
+	vllm-up vllm-down vllm-logs \
+	custom-up custom-down custom-logs \
+	api-up api-down api-logs worker-logs \
+	ui-up ui-down ui-logs \
+	observe observe-down prom-logs grafana-logs \
+	smoke stress bench \
+	app-stress app-stress-llm app-stress-all vllm-stress \
+	lint \
+	all prod-pull prod-up prod-down
 
-API_KEY ?= changeme
 
-help: ## Show available targets
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
+# ── Help ──────────────────────────────────────────────────────────────────────
 
-build: ## Build the Triton image (installs transformers/optimum/torch-cpu)
+help: ## Show available targets grouped by section
+	@awk 'BEGIN{FS=":.*?## "; section=""} \
+		/^## / { printf "\n\033[1m%s\033[0m\n", substr($$0,4) } \
+		/^[a-zA-Z_-]+:.*?## / { printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2 }' \
+		$(MAKEFILE_LIST)
+
+
+# ── Build ─────────────────────────────────────────────────────────────────────
+## Build
+
+build-triton: ## Build the Triton image (large: installs torch + optimum, ~30 min)
 	$(COMPOSE) build triton
 
-build-app: ## Build the API + worker image
+build-app: ## Build the API + Celery worker image
 	$(COMPOSE) build api
 
 build-ui: ## Build the Gradio UI image
 	$(COMPOSE) build ui
 
-export: ## Export HF checkpoints to ONNX into model_repository/ (run once before `up`)
+build-custom: ## Build the example custom inference service image
+	$(COMPOSE) build custom-service
+
+build: build-triton build-app build-ui ## Build all images (Triton + app + UI)
+
+export: ## Export HF checkpoints → ONNX inside the Triton container (run once before triton-up)
 	$(COMPOSE) run --rm --no-deps -w /workspace triton \
 		python3 scripts/export_models.py --model-repository /models
 
-up: ## Start Triton + Redis in the background
-	$(COMPOSE) up -d triton redis
+clean: ## Delete exported ONNX artifacts from inference/triton/model_repository/ (runs inside Docker)
+	$(COMPOSE) run --rm --no-deps -w /workspace triton \
+		sh -c 'rm -rf /models/*/1/onnx'
 
-api-up: ## Start API + Celery worker (requires: make up)
-	$(COMPOSE) up -d api worker
 
-api-down: ## Stop API + worker only
-	$(COMPOSE) stop api worker
+# ── Infrastructure ────────────────────────────────────────────────────────────
+## Infrastructure
 
-ui-up: ## Start Gradio demo UI (requires: make api-up)
-	$(COMPOSE) up -d ui
+infra-up: ## Start core infra: Redis + Traefik
+	$(COMPOSE) up -d redis traefik
 
-ui-down: ## Stop Gradio demo UI
-	$(COMPOSE) stop ui
+infra-down: ## Stop Redis + Traefik
+	$(COMPOSE) stop redis traefik
 
-down: ## Stop and remove containers
+gateway-up: ## Start Traefik reverse proxy / API gateway
+	$(COMPOSE) up -d traefik
+
+gateway-down: ## Stop Traefik
+	$(COMPOSE) stop traefik
+
+ps: ## Show status of all running containers
+	$(COMPOSE) ps
+
+down: ## Stop and remove all containers
 	$(COMPOSE) down
 
-remove: ## Stop and remove containers, volumes, and networks
+remove: ## Stop and remove containers, volumes, networks, and images
 	$(COMPOSE) down -v --rmi all --remove-orphans
 
-logs: ## Tail Triton logs
+
+# ── Inference engines ─────────────────────────────────────────────────────────
+## Inference engines
+
+triton-up: ## Start Triton Inference Server (ONNX NMT models; requires: make export)
+	$(COMPOSE) up -d triton
+
+triton-down: ## Stop Triton
+	$(COMPOSE) stop triton
+
+triton-logs: ## Tail Triton logs
 	$(COMPOSE) logs -f triton
 
-api-logs: ## Tail API logs
+triton-ready: ## Probe Triton readiness endpoint
+	@curl -fsS localhost:8000/v2/health/ready >/dev/null \
+		&& echo "triton: READY" || echo "triton: NOT READY"
+
+vllm-up: ## Start vLLM (Qwen/Qwen3.5-0.8B, OpenAI-compatible API on :8010; requires GPU)
+	$(COMPOSE) up -d vllm
+
+vllm-down: ## Stop vLLM
+	$(COMPOSE) stop vllm
+
+vllm-logs: ## Tail vLLM logs
+	$(COMPOSE) logs -f vllm
+
+custom-up: ## Start the example custom inference service (inference/custom/example_service/)
+	$(COMPOSE) up -d custom-service
+
+custom-down: ## Stop the example custom inference service
+	$(COMPOSE) stop custom-service
+
+custom-logs: ## Tail custom inference service logs
+	$(COMPOSE) logs -f custom-service
+
+
+# ── Backend API ───────────────────────────────────────────────────────────────
+## Backend API
+
+api-up: ## Start FastAPI + Celery worker (requires: infra-up + triton-up)
+	$(COMPOSE) up -d api worker
+
+api-down: ## Stop FastAPI + Celery worker
+	$(COMPOSE) stop api worker
+
+api-logs: ## Tail FastAPI logs
 	$(COMPOSE) logs -f api
 
 worker-logs: ## Tail Celery worker logs
 	$(COMPOSE) logs -f worker
 
+
+# ── Frontend UI ───────────────────────────────────────────────────────────────
+## Frontend UI
+
+ui-up: ## Start Gradio demo UI at http://localhost/ (requires: api-up)
+	$(COMPOSE) up -d ui
+
+ui-down: ## Stop Gradio UI
+	$(COMPOSE) stop ui
+
 ui-logs: ## Tail Gradio UI logs
 	$(COMPOSE) logs -f ui
 
-ps: ## Show service status
-	$(COMPOSE) ps
 
-ready: ## Probe Triton readiness endpoint
-	@curl -fsS localhost:8000/v2/health/ready >/dev/null \
-		&& echo "triton: READY" || echo "triton: NOT READY"
+# ── Observability ─────────────────────────────────────────────────────────────
+## Observability
 
-smoke: ## Translate a sample both ways (needs: pip install -e '.[client]')
-	python scripts/smoke_test.py --url localhost:8000
-
-stress: ## Stress-test both models and print latency report (needs: pip install -e '.[client]')
-	python scripts/stresstest.py --url localhost:8000
-
-eval: ## Evaluate translation quality with BLEU/chrF on 5000 HF samples (needs: pip install -e '.[eval]')
-	python scripts/stresstest.py --url localhost:8000 \
-		--eval-dataset talmp/en-vi-translation \
-		--eval-samples 5000 \
-		--concurrency 20
-
-app-stress: ## Stress-test the FastAPI app (needs: make api-up; override key with API_KEY=mykey)
-	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY)
-
-app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (needs: make api-up, pip install -e '.[eval]')
-	python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key $(API_KEY) \
-		--eval-dataset talmp/en-vi-translation \
-		--eval-samples 5000 \
-		--concurrency 20 \
-		--results-file results/app_eval_en_vi.json
-
-observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
+observe: ## Start full observability stack: Prometheus, Grafana, Loki, Promtail, node/DCGM exporters
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
 
-lint: ## Run ruff + pylint over src/ and tests/
-	ruff check .
-	pylint src/ tests/
+observe-down: ## Stop observability stack
+	$(COMPOSE) stop node-exporter dcgm-exporter prometheus grafana loki promtail
 
-clean: ## Delete exported ONNX artifacts (uses Docker to handle root-owned files)
-	$(COMPOSE) run --rm --no-deps -w /workspace triton \
-		sh -c 'rm -rf /models/*/1/onnx'
+prom-logs: ## Tail Prometheus logs
+	$(COMPOSE) logs -f prometheus
 
-all: build build-app export up api-up observe ## Build all images, export models, start all services
+grafana-logs: ## Tail Grafana logs
+	$(COMPOSE) logs -f grafana
+
+
+# ── Testing & evaluation ──────────────────────────────────────────────────────
+## Testing & evaluation
+
+smoke: ## Smoke-test Triton directly (translate a sample both ways)
+	python inference/triton/scripts/smoke_test.py --url localhost:8000
+
+stress: ## Stress-test Triton directly — latency/throughput report
+	python scripts/stresstest.py --url localhost:8000
+
+bench: ## GPU saturation benchmark via Triton (async, long texts, high concurrency)
+	python scripts/stresstest.py --url localhost:8000 \
+		--async --requests 5000 --concurrency 64 --text-size long
+
+app-stress: ## Stress-test the FastAPI app via Triton NMT backend (needs: api-up; API_KEY=mykey)
+	python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key $(API_KEY)
+
+vllm-stress: ## Stress-test vLLM directly via OpenAI API (needs: vllm-up)
+	python scripts/stresstest.py --target vllm --vllm-url localhost:8010 \
+		--requests 100 --concurrency 8 --text-size medium
+
+app-stress-llm: ## Stress-test FastAPI routed through vLLM (needs: api-up + vllm-up)
+	python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key $(API_KEY) \
+		--model llm --requests 50 --concurrency 4 --text-size medium
+
+app-stress-all: ## Stress-test FastAPI with BOTH backends: NMT (Triton) + LLM (vLLM) combined report (needs: api-up + vllm-up)
+	python scripts/app_stresstest.py \
+		--api-url http://localhost:80 --api-key $(API_KEY) \
+		--nmt-requests 100 --nmt-concurrency 4 \
+		--llm-requests 20  --llm-concurrency 4 \
+		--text-size short
+
+
+# ── Dev ───────────────────────────────────────────────────────────────────────
+## Dev
+
+lint: ## Run ruff check + pylint over apps/api/
+	cd apps/api && ruff check . && pylint src/ tests/
+
+
+# ── Shortcuts ─────────────────────────────────────────────────────────────────
+## Shortcuts
+
+all: build-app build-ui infra-up triton-up api-up ui-up observe ## Build and start everything (Triton must be pre-built)
+
+prod-pull: ## Pull pre-built images from GHCR (GATEWAY_TAG=, UI_TAG=, TRITON_TAG=)
+	GATEWAY_TAG=$(GATEWAY_TAG) UI_TAG=$(UI_TAG) TRITON_TAG=$(TRITON_TAG) \
+		$(PROD_COMPOSE) pull triton api worker ui
+
+prod-up: ## Start all services from GHCR images without building
+	GATEWAY_TAG=$(GATEWAY_TAG) UI_TAG=$(UI_TAG) TRITON_TAG=$(TRITON_TAG) \
+		$(PROD_COMPOSE) up -d --no-build
+
+prod-down: ## Stop and remove prod containers
+	$(PROD_COMPOSE) down

@@ -12,6 +12,8 @@ venv/
 # Exported ONNX artifacts are large build outputs, not source. Regenerate with `make export`.
 # The model.py and config.pbtxt next to them stay tracked.
 model_repository/**/onnx/
+services/serving/triton/**/onnx/
+inference/triton/**/onnx/
 
 # Caches
 .cache/
@@ -23,3 +25,4 @@ data/raw/
 *.log
 .vscode
 results/
+TODO.md
