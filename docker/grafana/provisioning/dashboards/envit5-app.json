@@ -1,6 +1,6 @@
 {
   "annotations": { "list": [] },
-  "description": "Application metrics for the EN↔VI translation service (FastAPI + Celery + Triton)",
+  "description": "Application metrics for the EN↔VI translation service (FastAPI + Celery + vLLM)",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -215,13 +215,13 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.50, sum(rate(envit5_triton_infer_duration_seconds_bucket[$__rate_interval])) by (le, model))",
+          "expr": "histogram_quantile(0.50, sum(rate(envit5_vllm_infer_duration_seconds_bucket[$__rate_interval])) by (le, model))",
           "legendFormat": "p50 {{model}}",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "histogram_quantile(0.95, sum(rate(envit5_triton_infer_duration_seconds_bucket[$__rate_interval])) by (le, model))",
+          "expr": "histogram_quantile(0.95, sum(rate(envit5_vllm_infer_duration_seconds_bucket[$__rate_interval])) by (le, model))",
           "legendFormat": "p95 {{model}}",
           "refId": "B"
         }

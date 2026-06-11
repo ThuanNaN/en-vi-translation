@@ -1,0 +1,10 @@
+http:
+  middlewares:
+    rate-limit:
+      rateLimit:
+        average: 100   # requests per second (per source IP)
+        period: 1s
+        burst: 50
+
+    compress:
+      compress: {}

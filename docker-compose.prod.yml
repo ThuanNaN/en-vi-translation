@@ -13,6 +13,9 @@ services:
   triton:
     image: ghcr.io/thuannan/envit5-triton:${IMAGE_TAG:-v0.1.0}
 
+  traefik:
+    image: traefik:v3.3
+
   api:
     image: ghcr.io/thuannan/envit5-app:${IMAGE_TAG:-v0.1.0}
 

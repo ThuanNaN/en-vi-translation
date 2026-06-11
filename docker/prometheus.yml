@@ -18,6 +18,11 @@ scrape_configs:
       - targets: ['triton:8002']
     metrics_path: /metrics
 
+  - job_name: traefik
+    static_configs:
+      - targets: ['traefik:8899']
+    metrics_path: /metrics
+
   - job_name: prometheus
     static_configs:
       - targets: ['localhost:9090']

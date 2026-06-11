@@ -14,7 +14,6 @@ services:
       --model-control-mode=none
     working_dir: /workspace
     environment:
-      # Used by scripts/export_models.py when run inside this container (`make export`).
       ENVIT5_HF_MODEL_EN_VI: ${ENVIT5_HF_MODEL_EN_VI:-Helsinki-NLP/opus-mt-en-vi}
       ENVIT5_HF_MODEL_VI_EN: ${ENVIT5_HF_MODEL_VI_EN:-Helsinki-NLP/opus-mt-vi-en}
     volumes:
@@ -43,11 +42,35 @@ services:
         - CMD
         - python3
         - -c
-        - import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready')
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready')"
       interval: 15s
       timeout: 5s
       retries: 20
       start_period: 90s
+
+  traefik:
+    image: traefik:v3.3
+    ports:
+      - "80:80"      # HTTP — main entry point for all external traffic
+      - "8888:8080"  # Traefik dashboard (dev only — http://localhost:8888/dashboard/)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   redis:
     image: redis:7-alpine
@@ -74,20 +97,25 @@ services:
       context: .
       dockerfile: docker/app.Dockerfile
     image: envit5/app:local
-    ports:
-      - "8080:8080"
+    # No host port binding — traffic enters via Traefik on port 80.
+    # Prometheus scrapes api:8080/metrics directly over the Docker network.
     environment:
-      ENVIT5_TRITON_HTTP_URL: triton:8000
-      ENVIT5_TRITON_GRPC_URL: triton:8001
       ENVIT5_REDIS_URL: redis://redis:6379/0
       ENVIT5_CELERY_BROKER_URL: redis://redis:6379/1
       ENVIT5_CELERY_RESULT_BACKEND: redis://redis:6379/2
       ENVIT5_API_KEYS: ${ENVIT5_API_KEYS:-changeme}
     command: ["uvicorn", "envit5.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/translate`) || PathPrefix(`/jobs`) || Path(`/health`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.priority=10"
+      - "traefik.http.routers.api.middlewares=rate-limit@file,compress@file"
+      - "traefik.http.services.api.loadbalancer.server.port=8080"
     depends_on:
-      triton:
-        condition: service_healthy
       redis:
+        condition: service_healthy
+      traefik:
         condition: service_healthy
     deploy:
       resources:
@@ -145,11 +173,18 @@ services:
       context: .
       dockerfile: docker/ui.Dockerfile
     image: envit5/ui:local
-    ports:
-      - "7860:7860"
+    # No host port binding — served at http://localhost/ via Traefik.
+    # The UI talks to the API over the internal Docker network (http://api:8080),
+    # bypassing Traefik entirely for backend calls.
     environment:
       ENVIT5_API_URL: http://api:8080
       ENVIT5_API_KEY: ${ENVIT5_API_KEYS:-changeme}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.ui.entrypoints=web"
+      - "traefik.http.routers.ui.priority=1"
+      - "traefik.http.services.ui.loadbalancer.server.port=7860"
     depends_on:
       api:
         condition: service_healthy

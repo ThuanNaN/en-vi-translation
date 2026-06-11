@@ -6,6 +6,10 @@ Triton backend (direct, default):
     python scripts/stresstest.py --url localhost:8000 --requests 200 --concurrency 16
     python scripts/stresstest.py --direction en-vi --output report.txt
 
+Async Triton benchmark (higher GPU utilisation):
+    python scripts/stresstest.py --async --requests 500 --concurrency 32 --text-size long
+    python scripts/stresstest.py --async --direction en-vi --requests 200 --concurrency 16
+
 FastAPI app backend (POST /translate + poll GET /jobs/{id}):
     python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key changeme
     python scripts/stresstest.py --target app --api-key changeme --direction en-vi
@@ -68,6 +72,185 @@ _SAMPLE_TEXTS: dict[str, list[str]] = {
     ],
 }
 
+# Multi-sentence inputs: each generates ~40-80 tokens — enough to keep the GPU busy per
+# request so that concurrent batches actually saturate CUDA cores.
+_MEDIUM_TEXTS: dict[str, list[str]] = {
+    "translator_en_vi": [
+        (
+            "The development of artificial intelligence has transformed many industries in "
+            "recent years. Companies are investing heavily in machine learning research and "
+            "infrastructure. These technologies can help automate complex tasks and improve "
+            "overall efficiency. However, there are also growing concerns about job "
+            "displacement and data privacy."
+        ),
+        (
+            "Vietnam is a beautiful country located in Southeast Asia with a rich history "
+            "and vibrant culture. The country stretches over one thousand kilometres from "
+            "north to south. It has diverse landscapes including mountains, rivers, and a "
+            "long coastline along the South China Sea. Vietnamese cuisine is renowned for "
+            "its fresh ingredients, aromatic herbs, and bold flavours."
+        ),
+        (
+            "Climate change is one of the most pressing challenges facing humanity today. "
+            "Rising global temperatures are causing more frequent and severe weather events. "
+            "Governments and scientists around the world are working together to develop "
+            "renewable energy solutions and reduce carbon emissions. Individual actions, "
+            "such as reducing energy consumption and choosing sustainable products, also "
+            "play an important role."
+        ),
+        (
+            "Education is the foundation of a prosperous society. Access to quality "
+            "education empowers individuals to reach their full potential and contribute "
+            "meaningfully to their communities. Modern technology has opened new avenues "
+            "for learning, allowing students to access educational resources from anywhere "
+            "in the world. Online platforms and digital tools are transforming how knowledge "
+            "is shared and acquired."
+        ),
+        (
+            "The global economy has undergone significant changes over the past decade. "
+            "International trade and investment flows have increased dramatically due to "
+            "advances in transportation and communication technology. Emerging markets in "
+            "Asia, Africa, and Latin America are playing an increasingly important role in "
+            "the world economy. Businesses must adapt to rapidly changing market conditions "
+            "in order to remain competitive."
+        ),
+    ],
+    "translator_vi_en": [
+        (
+            "Trí tuệ nhân tạo đang thay đổi nhiều ngành công nghiệp trong những năm gần "
+            "đây. Các công ty đang đầu tư mạnh mẽ vào nghiên cứu và cơ sở hạ tầng học "
+            "máy. Những công nghệ này có thể giúp tự động hóa các tác vụ phức tạp và cải "
+            "thiện hiệu quả tổng thể. Tuy nhiên, cũng có những lo ngại ngày càng tăng về "
+            "việc mất việc làm và quyền riêng tư dữ liệu."
+        ),
+        (
+            "Việt Nam là một đất nước tươi đẹp nằm ở Đông Nam Á với lịch sử phong phú và "
+            "văn hóa sôi động. Đất nước trải dài hơn một nghìn kilômét từ bắc vào nam. "
+            "Việt Nam có địa hình đa dạng bao gồm núi non, sông ngòi và đường bờ biển dài "
+            "dọc theo Biển Đông. Ẩm thực Việt Nam nổi tiếng với nguyên liệu tươi, rau thơm "
+            "và hương vị đậm đà."
+        ),
+        (
+            "Biến đổi khí hậu là một trong những thách thức cấp bách nhất mà nhân loại "
+            "đang phải đối mặt. Nhiệt độ toàn cầu tăng cao đang gây ra các hiện tượng thời "
+            "tiết ngày càng khắc nghiệt và thường xuyên hơn. Các chính phủ và nhà khoa học "
+            "trên toàn thế giới đang hợp tác để phát triển các giải pháp năng lượng tái tạo "
+            "và giảm lượng khí thải carbon."
+        ),
+        (
+            "Giáo dục là nền tảng của một xã hội phồn thịnh. Tiếp cận giáo dục chất lượng "
+            "trao quyền cho cá nhân phát huy hết tiềm năng của mình và đóng góp có ý nghĩa "
+            "cho cộng đồng. Công nghệ hiện đại đã mở ra những con đường học tập mới, cho "
+            "phép học sinh tiếp cận tài nguyên giáo dục từ bất kỳ đâu trên thế giới."
+        ),
+        (
+            "Nền kinh tế toàn cầu đã trải qua những thay đổi đáng kể trong thập kỷ qua. "
+            "Thương mại và đầu tư quốc tế đã tăng trưởng mạnh mẽ nhờ những tiến bộ trong "
+            "công nghệ vận tải và truyền thông. Các thị trường mới nổi ở châu Á, châu Phi "
+            "và châu Mỹ Latinh đang đóng vai trò ngày càng quan trọng trong nền kinh tế "
+            "thế giới."
+        ),
+    ],
+}
+
+# Paragraph-length inputs: each generates ~120-200 tokens — maximises GPU compute time
+# per request and makes dynamic-batching saturation very visible.
+_LONG_TEXTS: dict[str, list[str]] = {
+    "translator_en_vi": [
+        (
+            "Artificial intelligence and machine learning have become transformative forces "
+            "in the modern world. Over the past decade, breakthroughs in deep learning have "
+            "enabled computers to perform tasks that were once thought to be exclusively "
+            "within the domain of human intelligence, such as recognising images, "
+            "understanding speech, and translating languages. Large language models trained "
+            "on vast amounts of text data can now generate coherent and contextually "
+            "appropriate responses to a wide range of questions. These advances are driving "
+            "innovation across industries, from healthcare and finance to transportation and "
+            "entertainment. However, the rapid pace of AI development also raises important "
+            "ethical questions about bias, transparency, and accountability. Researchers, "
+            "policymakers, and businesses must work together to ensure that AI systems are "
+            "developed and deployed responsibly, in ways that benefit society as a whole "
+            "while minimising potential harms."
+        ),
+        (
+            "Vietnam's economic transformation over the past three decades is one of the "
+            "most remarkable development stories in modern history. Since the introduction "
+            "of the Doi Moi reforms in 1986, the country has shifted from a centrally "
+            "planned economy to a market-oriented one, resulting in rapid GDP growth and a "
+            "dramatic reduction in poverty. Millions of Vietnamese citizens have been lifted "
+            "out of poverty, and the country has become an important hub for manufacturing "
+            "and export in Southeast Asia. Foreign direct investment has poured in as "
+            "multinational companies seek to diversify their supply chains away from China. "
+            "At the same time, Vietnam is investing heavily in education, technology, and "
+            "infrastructure to move up the value chain and develop a more knowledge-based "
+            "economy. The country faces ongoing challenges including environmental "
+            "degradation, rising inequality, and the need to strengthen governance "
+            "institutions, but its prospects for continued growth remain strong."
+        ),
+        (
+            "The transition to renewable energy is one of the defining challenges of the "
+            "twenty-first century. Fossil fuels, which have powered economic growth for "
+            "over a century, are the primary driver of climate change. Solar and wind power "
+            "have become dramatically cheaper in recent years, making them increasingly "
+            "competitive with coal and natural gas. Battery storage technology is improving "
+            "rapidly, helping to address the intermittency problem that has historically "
+            "limited the reliability of renewable sources. Electric vehicles are gaining "
+            "market share, reducing dependence on petroleum in the transportation sector. "
+            "Governments around the world are setting ambitious targets for carbon "
+            "neutrality and investing in green infrastructure. However, the transition "
+            "requires massive capital investment, significant changes to electricity grid "
+            "architecture, and careful management of the social impacts on communities "
+            "that depend on fossil fuel industries for their livelihoods."
+        ),
+    ],
+    "translator_vi_en": [
+        (
+            "Trí tuệ nhân tạo và học máy đã trở thành những lực lượng chuyển đổi trong "
+            "thế giới hiện đại. Trong thập kỷ qua, những đột phá trong học sâu đã cho "
+            "phép máy tính thực hiện các nhiệm vụ từng được cho là thuộc về lĩnh vực trí "
+            "tuệ con người, chẳng hạn như nhận dạng hình ảnh, hiểu giọng nói và dịch "
+            "ngôn ngữ. Các mô hình ngôn ngữ lớn được đào tạo trên lượng dữ liệu văn bản "
+            "khổng lồ hiện có thể tạo ra các phản hồi mạch lạc và phù hợp với ngữ cảnh "
+            "cho nhiều loại câu hỏi. Những tiến bộ này đang thúc đẩy đổi mới trong các "
+            "ngành công nghiệp, từ y tế và tài chính đến vận tải và giải trí. Tuy nhiên, "
+            "tốc độ phát triển nhanh chóng của AI cũng đặt ra những câu hỏi đạo đức quan "
+            "trọng về sự thiên vị, tính minh bạch và trách nhiệm giải trình. Các nhà "
+            "nghiên cứu, nhà hoạch định chính sách và doanh nghiệp phải cùng nhau đảm bảo "
+            "rằng các hệ thống AI được phát triển và triển khai có trách nhiệm."
+        ),
+        (
+            "Sự chuyển đổi kinh tế của Việt Nam trong ba thập kỷ qua là một trong những "
+            "câu chuyện phát triển đáng chú ý nhất trong lịch sử hiện đại. Kể từ khi "
+            "thực hiện cải cách Đổi Mới năm 1986, đất nước đã chuyển từ nền kinh tế kế "
+            "hoạch tập trung sang nền kinh tế định hướng thị trường, dẫn đến tăng trưởng "
+            "GDP nhanh chóng và giảm nghèo đói đáng kể. Hàng triệu người dân Việt Nam đã "
+            "thoát khỏi đói nghèo và đất nước đã trở thành một trung tâm quan trọng về "
+            "sản xuất và xuất khẩu ở Đông Nam Á. Đầu tư trực tiếp nước ngoài đổ vào khi "
+            "các công ty đa quốc gia tìm cách đa dạng hóa chuỗi cung ứng của họ. Đồng "
+            "thời, Việt Nam đang đầu tư mạnh mẽ vào giáo dục, công nghệ và cơ sở hạ tầng "
+            "để tiến lên chuỗi giá trị và phát triển nền kinh tế dựa trên tri thức hơn."
+        ),
+        (
+            "Quá trình chuyển đổi sang năng lượng tái tạo là một trong những thách thức "
+            "định nghĩa của thế kỷ hai mươi mốt. Nhiên liệu hóa thạch, đã thúc đẩy tăng "
+            "trưởng kinh tế trong hơn một thế kỷ, là nguyên nhân chính gây ra biến đổi "
+            "khí hậu. Năng lượng mặt trời và gió đã trở nên rẻ hơn đáng kể trong những "
+            "năm gần đây, khiến chúng ngày càng cạnh tranh với than đá và khí đốt tự "
+            "nhiên. Công nghệ lưu trữ pin đang cải thiện nhanh chóng, giúp giải quyết vấn "
+            "đề gián đoạn đã từng hạn chế độ tin cậy của các nguồn tái tạo. Xe điện đang "
+            "chiếm thị phần ngày càng lớn, giảm sự phụ thuộc vào dầu mỏ trong lĩnh vực "
+            "giao thông. Các chính phủ trên thế giới đang đặt ra các mục tiêu đầy tham "
+            "vọng về trung hòa carbon và đầu tư vào cơ sở hạ tầng xanh."
+        ),
+    ],
+}
+
+_TEXT_POOLS: dict[str, dict[str, list[str]]] = {
+    "short": _SAMPLE_TEXTS,
+    "medium": _MEDIUM_TEXTS,
+    "long": _LONG_TEXTS,
+}
+
 _DATASET_COLS: dict[str, tuple[str, str]] = {
     # talmp/en-vi-translation uses "input" and "output".
     "translator_en_vi": ("input", "output"),
@@ -120,6 +303,62 @@ def _make_triton_translate_fn(url: str, model_name: str) -> Callable[[str], str]
         return _translate_one_triton(url, model_name, text)
 
     return fn
+
+
+def run_stress_async(
+    url: str,
+    model_name: str,
+    texts: list[str],
+    n_requests: int,
+    concurrency: int,
+) -> dict:
+    """
+    Async Triton benchmark via tritonclient.http.aio (asyncio HTTP).
+
+    Uses asyncio.Semaphore to keep exactly `concurrency` requests in-flight at
+    once without blocking OS threads. This saturates Triton's dynamic batcher
+    with far more queued requests than the thread-pool approach allows, which
+    drives larger batches and higher GPU utilisation.
+    """
+    import asyncio
+    import numpy as np
+    import tritonclient.http.aio as httpclient_aio  # type: ignore[import-untyped]
+
+    latencies: list[float] = [0.0] * n_requests
+    error_list: list[str] = []
+
+    async def _one_request(client, idx: int, sem: asyncio.Semaphore) -> None:
+        text = texts[idx % len(texts)]
+        inp = httpclient_aio.InferInput("INPUT_TEXT", [1, 1], "BYTES")
+        inp.set_data_from_numpy(np.array([[text]], dtype=object))
+        out = httpclient_aio.InferRequestedOutput("OUTPUT_TEXT")
+        async with sem:
+            t0 = time.perf_counter()
+            try:
+                await client.infer(model_name=model_name, inputs=[inp], outputs=[out])
+                latencies[idx] = time.perf_counter() - t0
+            except Exception as exc:
+                latencies[idx] = time.perf_counter() - t0
+                error_list.append(str(exc))
+
+    async def _run() -> float:
+        sem = asyncio.Semaphore(concurrency)
+        async with httpclient_aio.InferenceServerClient(url=url) as client:
+            t_start = time.perf_counter()
+            await asyncio.gather(*[_one_request(client, i, sem) for i in range(n_requests)])
+            return time.perf_counter() - t_start
+
+    total_seconds = asyncio.run(_run())
+
+    return {
+        "mode": "stress",
+        "model": model_name,
+        "n_requests": n_requests,
+        "concurrency": concurrency,
+        "total_seconds": total_seconds,
+        "latencies": latencies,
+        "errors": error_list,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +492,11 @@ def run_stress(
     model_name: str,
     n_requests: int,
     concurrency: int,
+    texts: list[str] | None = None,
     collect_translations: bool = False,
 ) -> dict:
-    texts = _SAMPLE_TEXTS[model_name]
+    if texts is None:
+        texts = _SAMPLE_TEXTS[model_name]
 
     latencies: list[float] = []
     errors: list[str] = []
@@ -723,7 +964,29 @@ def main() -> None:
         "--concurrency",
         type=int,
         default=8,
-        help="Number of concurrent workers",
+        help="Number of concurrent workers (or in-flight requests in --async mode)",
+    )
+    parser.add_argument(
+        "--text-size",
+        choices=["short", "medium", "long"],
+        default="short",
+        help=(
+            "Size of synthetic inputs: short (~5 tokens), medium (~60 tokens), "
+            "long (~150 tokens). Longer texts generate more GPU work per request "
+            "and are better for measuring peak throughput. Default: short"
+        ),
+    )
+    parser.add_argument(
+        "--async",
+        dest="use_async",
+        action="store_true",
+        default=False,
+        help=(
+            "Use tritonclient async_infer instead of a thread pool. "
+            "Fires all requests as fast as possible so Triton's dynamic batcher "
+            "sees many in-flight requests simultaneously — recommended for GPU "
+            "saturation benchmarks. Only valid for --target triton."
+        ),
     )
     parser.add_argument(
         "--direction",
@@ -787,6 +1050,10 @@ def main() -> None:
     if args.eval_samples <= 0:
         raise ValueError("--eval-samples must be greater than 0")
 
+    if args.use_async and args.target != "triton":
+        print("--async is only supported with --target triton", file=sys.stderr)
+        raise SystemExit(1)
+
     args.api_url = args.api_url.rstrip("/")
 
     model_map = {
@@ -797,6 +1064,7 @@ def main() -> None:
 
     selected = model_map[args.direction]
     collect_translations = bool(args.results_file)
+    text_pool = _TEXT_POOLS[args.text_size]
 
     if args.target == "triton":
         try:
@@ -850,9 +1118,10 @@ def main() -> None:
             print(f"[skip] {model_name} not ready", file=sys.stderr)
             continue
 
-        translate_fn = _make_fn(model_name)
+        texts = text_pool[model_name]
 
         if args.eval_dataset:
+            translate_fn = _make_fn(model_name)
             result = run_eval(
                 translate_fn=translate_fn,
                 model_name=model_name,
@@ -863,20 +1132,37 @@ def main() -> None:
                 concurrency=args.concurrency,
                 collect_translations=collect_translations,
             )
+        elif args.use_async:
+            mode_label = "async"
+            print(
+                f"[{mode_label}] {model_name} ({backend_label}): "
+                f"{args.requests} requests, concurrency={args.concurrency}, "
+                f"text-size={args.text_size}, samples={len(texts)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            result = run_stress_async(
+                url=args.url,
+                model_name=model_name,
+                texts=texts,
+                n_requests=args.requests,
+                concurrency=args.concurrency,
+            )
         else:
             print(
                 f"[stress] {model_name} ({backend_label}): "
                 f"{args.requests} requests, concurrency={args.concurrency}, "
-                f"samples={len(_SAMPLE_TEXTS[model_name])}",
+                f"text-size={args.text_size}, samples={len(texts)}",
                 file=sys.stderr,
                 flush=True,
             )
-
+            translate_fn = _make_fn(model_name)
             result = run_stress(
                 translate_fn=translate_fn,
                 model_name=model_name,
                 n_requests=args.requests,
                 concurrency=args.concurrency,
+                texts=texts,
                 collect_translations=collect_translations,
             )
 

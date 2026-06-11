@@ -19,7 +19,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- Triton ---
+    # --- Triton Inference Server ---
     triton_http_url: str = "localhost:8000"
     triton_grpc_url: str = "localhost:8001"
     triton_model_en_vi: str = "translator_en_vi"
@@ -60,7 +60,6 @@ class Settings(BaseSettings):
         if pair == ("vi", "en"):
             return self.triton_model_vi_en
         raise ValueError(f"Unsupported direction {source!r}->{target!r}; only en<->vi is served")
-
 
 @lru_cache
 def get_settings() -> Settings:
