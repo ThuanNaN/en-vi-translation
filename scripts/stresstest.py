@@ -35,6 +35,7 @@ import statistics
 import sys
 import threading
 import time
+import socket
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -442,27 +443,37 @@ def _translate_one_app(
         method="POST",
     )
 
-    try:
-        with urllib.request.urlopen(req, timeout=min(timeout, 10.0)) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            job_id = data["job_id"]
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"POST /translate failed {exc.code}: {body}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"POST /translate failed: {exc}") from exc
+    # Retry on 429 (Traefik rate limit) with exponential backoff.
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(req, timeout=min(timeout, 10.0)) as resp:
+                job_id = json.loads(resp.read().decode("utf-8"))["job_id"]
+            break
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < 4:
+                time.sleep(0.5 * (2 ** attempt))
+                continue
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"POST /translate failed {exc.code}: {body}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"POST /translate failed: {exc}") from exc
 
     poll_url = f"{api_url}/jobs/{job_id}"
     poll_headers = {"X-API-Key": api_key}
     deadline = time.monotonic() + timeout
+    rate_limit_backoff = poll_interval
 
     while time.monotonic() < deadline:
         req = urllib.request.Request(poll_url, headers=poll_headers)
-
         try:
             with urllib.request.urlopen(req, timeout=min(timeout, 10.0)) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
+            rate_limit_backoff = poll_interval
         except urllib.error.HTTPError as exc:
+            if exc.code == 429:
+                time.sleep(rate_limit_backoff)
+                rate_limit_backoff = min(rate_limit_backoff * 2, 4.0)
+                continue
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(f"GET /jobs/{job_id} failed {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
@@ -503,18 +514,35 @@ def _make_app_translate_fn(
     return fn
 
 
-def _check_app_ready(api_url: str) -> bool:
-    api_url = api_url.rstrip("/")
+def _resolve_app_url(api_url: str) -> str:
+    """Return a reachable base URL, falling back to IPv6 if IPv4 localhost fails.
 
-    for path in ["/health", "/ready", "/docs", "/"]:
+    On some Linux hosts the Docker IPv4 userland proxy doesn't forward correctly
+    while the IPv6 proxy works.  Probes /health on both and returns the winner.
+    """
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(api_url)
+    host = parsed.hostname or "localhost"
+    if host not in ("localhost", "127.0.0.1", "::1"):
+        return api_url
+    port = parsed.port or 80
+    for candidate_host in ("127.0.0.1", "[::1]"):
+        candidate = urlunparse(parsed._replace(netloc=f"{candidate_host}:{port}"))
         try:
-            with urllib.request.urlopen(f"{api_url}{path}", timeout=5) as resp:
-                if 200 <= resp.status < 500:
-                    return True
+            with urllib.request.urlopen(f"{candidate}/health", timeout=3) as resp:
+                if resp.status == 200:
+                    return candidate
         except Exception:
-            continue
+            pass
+    return api_url
 
-    return False
+
+def _check_app_ready(api_url: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"{api_url}/health", timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +884,7 @@ def main() -> None:
         print("--model is only used with --target app", file=sys.stderr)
         raise SystemExit(1)
 
-    args.api_url = args.api_url.rstrip("/")
+    args.api_url = _resolve_app_url(args.api_url.rstrip("/"))
 
     collect_translations = bool(args.results_file)
     text_pool = _TEXT_POOLS[args.text_size]
