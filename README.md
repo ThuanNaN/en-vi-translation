@@ -1,6 +1,6 @@
-# Polyglot
+# PolyglotHub — Model- and engine-agnostic translation/serving hub
 
-Multilingual Neural Machine Translation platform — pluggable serving backends, async job dispatch, and a production-ready API gateway.
+Model- and engine-agnostic translation/serving hub — pluggable serving backends, async job dispatch, and a production-ready API gateway.
 
 ```
                               ┌─────────────────────────────────────────────────────────────────┐
