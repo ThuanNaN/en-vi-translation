@@ -3,17 +3,34 @@
 Multilingual Neural Machine Translation platform — pluggable serving backends, async job dispatch, and a production-ready API gateway.
 
 ```
-                      Traefik :80
-                      ┌──────────────────────────────────────────────┐
-client ─POST /translate─▶ FastAPI ──enqueue──▶ Redis (broker) ──▶ Celery worker
-   ▲                         │ (returns job_id)                         │
-   └──GET /jobs/{id}─────────┘                                          ▼
-                 Redis (result cache + Celery backend)         BackendClient
-                                                              ┌────────────────┐
-  Prometheus ◀─ /metrics (api:8080, worker:9091, triton:8002) │ Triton  :8000  │
-       └──▶ Grafana :3000                                     │ vLLM    :8000  │ ← future
-                                                              │ HF      :8000  │ ← future
-                                                              └────────────────┘
+                              ┌─────────────────────────────────────────────────────────────────┐
+                              │                       Traefik  :80                               │
+                              └─────────────────────────┬───────────────────────────────────────┘
+                                                         │
+                    POST /translate                       ▼                     enqueue
+client ────────────────────────────────────────► FastAPI (api:8080) ──────────────────────────► Redis :6379
+   ▲                                                     │                                      │  ├─ db/1  broker
+   │  GET /jobs/{id}                                     │ 202 job_id                           │  ├─ db/2  result backend
+   └─────────────────────────────────────────────────────┘                                      │  └─ db/0  trans cache + job markers
+                                                                                                 │
+                                                                                                 ▼
+                                                                                      Celery worker (worker:9091)
+                                                                                                 │
+                                                                                  cache hit?      │
+                                                                          Redis ◄────────────────┤
+                                                                                                 │ cache miss
+                                                                                                 ▼
+                                                                                         BackendClient
+                                                                              ┌──────────────────────────────┐
+                                                                              │  Triton  :8000   NMT  (ONNX) │
+                                                                              │  vLLM    :8000   LLM  (Qwen) │
+                                                                              │  HF      —       (future)    │
+                                                                              └──────────────────────────────┘
+
+Observability
+  Prometheus :9090 ◄── /metrics ── api:8080 · worker:9091 · triton:8002
+       └──► Grafana :3000
+       └──► Loki    :3100 ◄── Promtail (log aggregation)
 ```
 
 ## Repo layout
@@ -33,18 +50,25 @@ infra/
 
 ## Key design decisions
 
-- **Backend registry** — `BACKENDS` (JSON env var) maps each language pair to a serving backend. Adding a language pair or swapping backends requires no code change:
+- **Backend registry** — `BACKENDS` (JSON env var) maps route keys to serving backends. Keys are `"src-tgt"` for the default NMT path, or a bare name like `"llm"` as a direction-agnostic fallback. Adding a language pair or backend requires no code change:
 
   ```bash
-  BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
-             "vi-en":{"type":"vllm","url":"vllm:8000","model_name":"Helsinki-NLP/opus-mt-vi-en"}}'
+  BACKENDS='{
+    "en-vi": {"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+    "vi-en": {"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
+    "llm":   {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B"}
+  }'
   ```
+
+  Lookup order for a request with `model="llm"`: `"src-tgt:llm"` → `"src-tgt"` → `"llm"`.
+
+- **Dual backends** — Triton serves fast ONNX seq2seq models (Helsinki-NLP/opus-mt); vLLM serves Qwen/Qwen3.5-0.8B via the OpenAI-compatible API. Clients select via the optional `model` field in the request body.
 
 - **Async API** — `POST /translate` enqueues a job and returns a `job_id`; `GET /jobs/{id}` polls for the result. Auth via `X-API-Key` header.
 
 - **Long-text chunking** — input is split at sentence boundaries into ≤ 1 500-char chunks and reassembled after translation.
 
-- **Redis caching** — results are cached by `sha256(direction:text)` for 24 h, short-circuiting the backend entirely on hits.
+- **Redis caching** — results are cached by `sha256(direction:text)` (keyed per backend) for 24 h, short-circuiting the backend entirely on hits.
 
 - **Traefik gateway** — rate-limited (100 req/s, burst 50) and gzip-compressed.
 
@@ -62,6 +86,7 @@ make export       # export HF checkpoints to ONNX (runs inside Triton container)
 make up           # Triton + Redis
 make gateway-up   # Traefik
 make api-up       # FastAPI + Celery worker
+make vllm-up      # vLLM / Qwen3.5-0.8B (optional; needs GPU)
 make ui-up        # Gradio demo (optional)
 make observe      # Prometheus + Grafana + Loki (optional)
 
@@ -83,7 +108,7 @@ make all
 
 ## Production deploy
 
-Uses pre-built GHCR images — each service repo versions independently:
+Uses pre-built GHCR images — each service versions independently:
 
 ```bash
 make prod-pull GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0
@@ -104,7 +129,15 @@ make prod-down
 ```json
 { "text": "Hello world", "source": "en", "target": "vi" }
 ```
-Or use the `direction` shorthand (`"en-vi"`), or omit both for auto-detection.
+
+| Field | Required | Description |
+|---|---|---|
+| `text` | yes | Text to translate |
+| `source` + `target` | no† | ISO language codes (`"en"`, `"vi"`, …) |
+| `direction` | no† | Shorthand: `"en-vi"` (mutually exclusive with `source`/`target`) |
+| `model` | no | Backend selector — omit for NMT (Triton), `"llm"` for Qwen/vLLM |
+
+† If both are omitted, the source language is auto-detected.
 
 ## Development
 
@@ -116,7 +149,7 @@ pytest                                                      # all tests
 pytest tests/api/test_translate.py::test_submit_en_vi      # single test
 
 ruff check . && ruff format .                               # lint + format
-make lint                                                   # ruff + pylint via Makefile
+make lint                                                   # ruff check + pylint via Makefile
 ```
 
 ## Configuration
@@ -126,12 +159,13 @@ Copy `.env.example` to `.env` to get started.
 | Variable | Default | Description |
 |---|---|---|
 | `API_KEYS` | — | Comma-separated API keys (**required**; empty = all requests rejected) |
-| `BACKENDS` | Triton en↔vi | JSON map of language pair → backend config |
+| `BACKENDS` | Triton en↔vi + vLLM | JSON map of route key → backend config |
 | `REDIS_URL` | `redis://localhost:6379/0` | Result cache |
 | `CELERY_BROKER_URL` | `redis://localhost:6379/1` | Task queue |
 | `CACHE_TTL_SECONDS` | `86400` | Translation cache TTL (24 h) |
-| `MAX_NEW_TOKENS` | `512` | Generation token limit |
+| `MAX_NEW_TOKENS` | `512` | Generation token limit (Triton) |
 | `NUM_BEAMS` | `1` | Beam search width (1 = greedy) |
+| `HF_TOKEN` | — | HuggingFace token (needed if model is gated) |
 | `GRAFANA_ADMIN_PASSWORD` | `admin` | Grafana password |
 
 ## Ports
@@ -143,6 +177,7 @@ Copy `.env.example` to `.env` to get started.
 | Triton HTTP | 8000 |
 | Triton gRPC | 8001 |
 | Triton metrics | 8002 |
+| vLLM OpenAI-compatible API | 8010 |
 | Worker Prometheus metrics | 9091 |
 | Prometheus | 9090 |
 | Grafana | 3000 |
@@ -152,6 +187,14 @@ The API (`8080`) has no host binding — all traffic enters via Traefik on port 
 
 ## Adding a new language pair or backend
 
-1. Deploy a serving container (Triton, vLLM, or HuggingFace Inference).
-2. Add an entry to `BACKENDS` — no gateway code change needed.
-3. (Triton only) Add model directory under `services/serving/triton/model_repository/` and run `make export`.
+**New language pair on Triton:**
+1. Add model directory under `services/serving/triton/model_repository/` and run `make export`.
+2. Add `"src-tgt": {"type":"triton", ...}` to `BACKENDS`.
+
+**New language pair on vLLM:**
+1. Add `"src-tgt": {"type":"vllm", ...}` to `BACKENDS` for a direction-specific override, or rely on the existing `"llm"` fallback entry — no container change needed.
+
+**New backend type:**
+1. Add a file under `services/gateway/src/polyglot_gateway/worker/backends/` implementing `translate(text, model_name, src, tgt) -> str`.
+2. Add a case in `backends/registry.py:make_backend_client()`.
+3. Add entries to `BACKENDS`.

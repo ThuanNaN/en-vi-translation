@@ -19,8 +19,6 @@ class BackendConfig(BaseModel):
     type: Literal["triton", "vllm", "hf"]
     url: str
     model_name: str
-    src_lang: str | None = None  # human-readable language name for LLM prompts, e.g. "English"
-    tgt_lang: str | None = None
 
 
 class Settings(BaseSettings):
@@ -67,20 +65,30 @@ class Settings(BaseSettings):
         return value
 
     def backend_for(self, src: str, tgt: str, model: str | None = None) -> BackendConfig:
-        """Return the BackendConfig for the given language pair (and optional model variant).
+        """Return the BackendConfig for the given language pair and optional model variant.
 
-        Key format: "src-tgt" (default NMT) or "src-tgt:model" (e.g. "en-vi:llm").
+        Lookup order:
+          1. "src-tgt:model"  — direction-specific model override (e.g. "en-vi:llm")
+          2. "src-tgt"        — direction-specific default (e.g. "en-vi")
+          3. "model"          — direction-agnostic backend (e.g. "llm" handles any direction)
         """
-        base = f"{src.lower()}-{tgt.lower()}"
-        key = f"{base}:{model.lower()}" if model else base
-        if key not in self.backends:
-            supported = ", ".join(self.backends)
-            raise ValueError(
-                f"No backend configured for {src!r}->{tgt!r}"
-                + (f" model={model!r}" if model else "")
-                + f". Configured: {supported}"
-            )
-        return self.backends[key]
+        src, tgt = src.lower(), tgt.lower()
+        model_l = model.lower() if model else None
+        candidates = []
+        if model_l:
+            candidates.append(f"{src}-{tgt}:{model_l}")
+        candidates.append(f"{src}-{tgt}")
+        if model_l:
+            candidates.append(model_l)
+        for key in candidates:
+            if key in self.backends:
+                return self.backends[key]
+        supported = ", ".join(self.backends)
+        raise ValueError(
+            f"No backend configured for {src!r}->{tgt!r}"
+            + (f" model={model!r}" if model else "")
+            + f". Configured: {supported}"
+        )
 
 
 @lru_cache

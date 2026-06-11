@@ -4,21 +4,36 @@ from __future__ import annotations
 import json
 import urllib.request
 
+_LANG_NAMES: dict[str, str] = {
+    "en": "English",
+    "vi": "Vietnamese",
+    "fr": "French",
+    "de": "German",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "es": "Spanish",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ar": "Arabic",
+    "th": "Thai",
+}
+
 
 class VLLMBackendClient:
-    def __init__(self, url: str, src_lang: str | None = None, tgt_lang: str | None = None) -> None:
+    def __init__(self, url: str) -> None:
         self._endpoint = f"http://{url}/v1/chat/completions"
-        self._src = src_lang or "the source language"
-        self._tgt = tgt_lang or "the target language"
 
-    def translate(self, text: str, model_name: str) -> str:
+    def translate(self, text: str, model_name: str, src: str = "", tgt: str = "") -> str:
+        src_lang = _LANG_NAMES.get(src, src)
+        tgt_lang = _LANG_NAMES.get(tgt, tgt)
         payload = json.dumps({
             "model": model_name,
             "messages": [
                 {
                     "role": "system",
                     "content": (
-                        f"Translate from {self._src} to {self._tgt}. "
+                        f"Translate from {src_lang} to {tgt_lang}. "
                         "Output only the translation, no explanations."
                     ),
                 },
@@ -26,8 +41,7 @@ class VLLMBackendClient:
             ],
             "max_tokens": 512,
             "temperature": 0.0,
-            # Disable Qwen3-family thinking/reasoning so the model does not emit
-            # <think>...</think> tokens before the translation.
+            # Disable Qwen3-family thinking/reasoning tokens before the translation.
             "chat_template_kwargs": {"enable_thinking": False},
         }).encode()
         req = urllib.request.Request(

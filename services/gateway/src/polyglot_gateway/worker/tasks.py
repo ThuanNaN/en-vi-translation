@@ -51,7 +51,7 @@ def translate_task(self, text: str, src: str, tgt: str, model: str | None = None
         translated: list[str] = []
         for chunk in chunks:
             try:
-                translated.append(client.translate(chunk, backend_cfg.model_name))
+                translated.append(client.translate(chunk, backend_cfg.model_name, src, tgt))
             except Exception as exc:
                 translations_total.labels(direction=direction, status="retry").inc()
                 raise self.retry(exc=exc)

@@ -6,6 +6,8 @@ api:
   dashboard: true
   insecure: true   # exposes dashboard on container port 8080 — dev only
 
+ping: {}           # enables /ping on the traefik entrypoint (port 8080) for healthcheck
+
 entryPoints:
   web:
     address: ":80"

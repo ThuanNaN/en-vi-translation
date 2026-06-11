@@ -2,7 +2,7 @@
 Stress test and quality evaluation for translation endpoints.
 
 Triton backend (direct, default):
-    pip install -e '.[client]'
+    pip install -e '.[worker]'   # tritonclient + numpy
     python scripts/stresstest.py --url localhost:8000 --requests 200 --concurrency 16
     python scripts/stresstest.py --direction en-vi --output report.txt
 
@@ -10,12 +10,20 @@ Async Triton benchmark (higher GPU utilisation):
     python scripts/stresstest.py --async --requests 500 --concurrency 32 --text-size long
     python scripts/stresstest.py --async --direction en-vi --requests 200 --concurrency 16
 
-FastAPI app backend (POST /translate + poll GET /jobs/{id}):
-    python scripts/stresstest.py --target app --api-url http://localhost:8080 --api-key changeme
+vLLM backend (direct OpenAI-compatible API):
+    python scripts/stresstest.py --target vllm --vllm-url localhost:8010
+    python scripts/stresstest.py --target vllm --vllm-url localhost:8010 --direction en-vi --text-size medium
+
+FastAPI app backend — NMT (Triton):
+    python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key changeme
     python scripts/stresstest.py --target app --api-key changeme --direction en-vi
 
+FastAPI app backend — LLM (vLLM):
+    python scripts/stresstest.py --target app --api-key changeme --model llm
+    python scripts/stresstest.py --target app --api-key changeme --model llm --direction vi-en
+
 Quality evaluation (BLEU) using a HuggingFace dataset:
-    pip install -e '.[eval]'
+    pip install datasets sacrebleu
     python scripts/stresstest.py --eval-dataset talmp/en-vi-translation --eval-samples 1000
     python scripts/stresstest.py --target app --api-key changeme \
         --eval-dataset talmp/en-vi-translation --eval-samples 1000
@@ -262,6 +270,18 @@ _MODEL_TO_DIRECTION: dict[str, str] = {
     "translator_vi_en": "vi-en",
 }
 
+# vLLM: maps direction key → (src language name, tgt language name) for the prompt
+_VLLM_DIRECTION_LANGS: dict[str, tuple[str, str]] = {
+    "en-vi": ("English", "Vietnamese"),
+    "vi-en": ("Vietnamese", "English"),
+}
+
+# Maps direction key → text-pool key (shared between Triton and vLLM)
+_DIRECTION_TO_POOL_KEY: dict[str, str] = {
+    "en-vi": "translator_en_vi",
+    "vi-en": "translator_vi_en",
+}
+
 MODELS = list(_SAMPLE_TEXTS.keys())
 
 
@@ -362,6 +382,52 @@ def run_stress_async(
 
 
 # ---------------------------------------------------------------------------
+# vLLM backend (direct OpenAI-compatible chat API)
+# ---------------------------------------------------------------------------
+
+def _translate_one_vllm(url: str, model_name: str, direction: str, text: str) -> str:
+    src_lang, tgt_lang = _VLLM_DIRECTION_LANGS[direction]
+    payload = json.dumps({
+        "model": model_name,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"Translate from {src_lang} to {tgt_lang}. "
+                    "Output only the translation, no explanations."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "max_tokens": 512,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode()
+    req = urllib.request.Request(
+        f"http://{url}/v1/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read())
+    return data["choices"][0]["message"]["content"].strip()
+
+
+def _make_vllm_translate_fn(url: str, model_name: str, direction: str) -> Callable[[str], str]:
+    def fn(text: str) -> str:
+        return _translate_one_vllm(url, model_name, direction, text)
+    return fn
+
+
+def _check_vllm_ready(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(f"http://{url}/health", timeout=5) as resp:
+            return 200 <= resp.status < 500
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # App backend: FastAPI POST /translate -> poll GET /jobs/{job_id}
 # ---------------------------------------------------------------------------
 
@@ -372,6 +438,7 @@ def _translate_one_app(
     text: str,
     poll_interval: float = 0.5,
     timeout: float = 60.0,
+    model: str | None = None,
 ) -> str:
     api_url = api_url.rstrip("/")
 
@@ -380,13 +447,11 @@ def _translate_one_app(
         "X-API-Key": api_key,
     }
 
-    payload = json.dumps(
-        {
-            "text": text,
-            "direction": direction,
-        },
-        ensure_ascii=False,
-    ).encode("utf-8")
+    body: dict = {"text": text, "direction": direction}
+    if model:
+        body["model"] = model
+
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
     req = urllib.request.Request(
         f"{api_url}/translate",
@@ -440,6 +505,7 @@ def _make_app_translate_fn(
     direction: str,
     poll_interval: float,
     timeout: float,
+    model: str | None = None,
 ) -> Callable[[str], str]:
     def fn(text: str) -> str:
         return _translate_one_app(
@@ -449,6 +515,7 @@ def _make_app_translate_fn(
             text=text,
             poll_interval=poll_interval,
             timeout=timeout,
+            model=model,
         )
 
     return fn
@@ -915,11 +982,12 @@ def main() -> None:
 
     parser.add_argument(
         "--target",
-        choices=["triton", "app"],
+        choices=["triton", "vllm", "app"],
         default="triton",
         help=(
-            "Backend to test: 'triton' for direct Triton HTTP, "
-            "or 'app' for FastAPI POST /translate. Default: triton"
+            "Backend to test: 'triton' (direct Triton HTTP), "
+            "'vllm' (direct vLLM OpenAI API), "
+            "or 'app' (FastAPI POST /translate). Default: triton"
         ),
     )
 
@@ -927,19 +995,40 @@ def main() -> None:
     triton_grp.add_argument(
         "--url",
         default="localhost:8000",
-        help="Triton HTTP endpoint, for example localhost:8000",
+        help="Triton HTTP endpoint. Default: localhost:8000",
     )
 
-    app_grp = parser.add_argument_group("app backend")
+    vllm_grp = parser.add_argument_group("vllm backend (--target vllm)")
+    vllm_grp.add_argument(
+        "--vllm-url",
+        default="localhost:8010",
+        help="vLLM OpenAI-compatible API endpoint. Default: localhost:8010",
+    )
+    vllm_grp.add_argument(
+        "--vllm-model-name",
+        default="Qwen/Qwen3.5-0.8B",
+        help="Model name served by vLLM. Default: Qwen/Qwen3.5-0.8B",
+    )
+
+    app_grp = parser.add_argument_group("app backend (--target app)")
     app_grp.add_argument(
         "--api-url",
-        default="http://localhost:8080",
-        help="FastAPI base URL",
+        default="http://localhost:80",
+        help="FastAPI base URL. Default: http://localhost:80",
     )
     app_grp.add_argument(
         "--api-key",
         default="changeme",
         help="X-API-Key header value",
+    )
+    app_grp.add_argument(
+        "--model",
+        default=None,
+        metavar="BACKEND",
+        help=(
+            "Backend selector for app target: omit for NMT/Triton, "
+            "'llm' for vLLM. Passed as 'model' in the request body."
+        ),
     )
     app_grp.add_argument(
         "--poll-interval",
@@ -1054,15 +1143,12 @@ def main() -> None:
         print("--async is only supported with --target triton", file=sys.stderr)
         raise SystemExit(1)
 
+    if args.model and args.target != "app":
+        print("--model is only used with --target app", file=sys.stderr)
+        raise SystemExit(1)
+
     args.api_url = args.api_url.rstrip("/")
 
-    model_map = {
-        "en-vi": ["translator_en_vi"],
-        "vi-en": ["translator_vi_en"],
-        "both": MODELS,
-    }
-
-    selected = model_map[args.direction]
     collect_translations = bool(args.results_file)
     text_pool = _TEXT_POOLS[args.text_size]
 
@@ -1071,7 +1157,7 @@ def main() -> None:
             import tritonclient.http as httpclient  # type: ignore[import-untyped]
         except ImportError:
             print(
-                "tritonclient not found. Install with: pip install -e '.[client]'",
+                "tritonclient not found. Install with: pip install -e '.[worker]'",
                 file=sys.stderr,
             )
             raise SystemExit(1)
@@ -1082,6 +1168,13 @@ def main() -> None:
             print(f"Triton at {args.url} is not ready.", file=sys.stderr)
             raise SystemExit(1)
 
+        model_map = {
+            "en-vi": ["translator_en_vi"],
+            "vi-en": ["translator_vi_en"],
+            "both": MODELS,
+        }
+        selected = model_map[args.direction]
+
         def _is_ready(model_name: str) -> bool:
             return client.is_model_ready(model_name)
 
@@ -1090,26 +1183,53 @@ def main() -> None:
 
         backend_label = f"triton ({args.url})"
 
-    else:
+    elif args.target == "vllm":
+        if not _check_vllm_ready(args.vllm_url):
+            print(f"vLLM at {args.vllm_url} is not reachable.", file=sys.stderr)
+            raise SystemExit(1)
+
+        direction_map = {
+            "en-vi": ["en-vi"],
+            "vi-en": ["vi-en"],
+            "both": list(_VLLM_DIRECTION_LANGS.keys()),
+        }
+        selected = direction_map[args.direction]
+
+        def _is_ready(_: str) -> bool:
+            return True
+
+        def _make_fn(direction: str) -> Callable[[str], str]:  # type: ignore[misc]
+            return _make_vllm_translate_fn(args.vllm_url, args.vllm_model_name, direction)
+
+        backend_label = f"vllm ({args.vllm_url}, {args.vllm_model_name})"
+
+    else:  # app
         if not _check_app_ready(args.api_url):
             print(f"FastAPI app at {args.api_url} is not reachable.", file=sys.stderr)
             raise SystemExit(1)
+
+        model_map = {
+            "en-vi": ["translator_en_vi"],
+            "vi-en": ["translator_vi_en"],
+            "both": MODELS,
+        }
+        selected = model_map[args.direction]
 
         def _is_ready(_model_name: str) -> bool:
             return True
 
         def _make_fn(model_name: str) -> Callable[[str], str]:
             direction = _MODEL_TO_DIRECTION[model_name]
-
             return _make_app_translate_fn(
                 api_url=args.api_url,
                 api_key=args.api_key,
                 direction=direction,
                 poll_interval=args.poll_interval,
                 timeout=args.job_timeout,
+                model=args.model,
             )
 
-        backend_label = f"app ({args.api_url})"
+        backend_label = f"app ({args.api_url})" + (f" model={args.model}" if args.model else "")
 
     results: list[dict] = []
 
@@ -1118,7 +1238,8 @@ def main() -> None:
             print(f"[skip] {model_name} not ready", file=sys.stderr)
             continue
 
-        texts = text_pool[model_name]
+        pool_key = _DIRECTION_TO_POOL_KEY.get(model_name, model_name)
+        texts = text_pool[pool_key]
 
         if args.eval_dataset:
             translate_fn = _make_fn(model_name)

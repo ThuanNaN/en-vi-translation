@@ -47,21 +47,25 @@ Makefile              # top-level orchestration (COMPOSE points to infra/compose
   Adding a language pair or backend variant = env var change, no code.
 
   ```bash
-  # Triton NMT (default) + vLLM LLM routes for both directions:
+  # Triton NMT (default) + one vLLM entry covering all directions:
   BACKENDS='{
-    "en-vi":     {"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
-    "vi-en":     {"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
-    "en-vi:llm": {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"English","tgt_lang":"Vietnamese"},
-    "vi-en:llm": {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"Vietnamese","tgt_lang":"English"}
+    "en-vi": {"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+    "vi-en": {"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
+    "llm":   {"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B"}
   }'
   ```
+
+  Lookup order for `backend_for(src, tgt, model)`: `"src-tgt:model"` → `"src-tgt"` → `"model"`.
+  The `"llm"` key acts as a direction-agnostic fallback — `src`/`tgt` are passed directly to
+  `VLLMBackendClient.translate()` where they are resolved to language names for the prompt.
 
 - **BackendClient Protocol** — `services/gateway/src/polyglot_gateway/worker/backends/base.py`
   defines `BackendClient(Protocol)` with one method: `translate(text, model_name) -> str`.
   `backends/triton.py` implements it with `tritonclient.http`; `backends/vllm.py` implements it
   with a plain `urllib.request` POST to `/v1/chat/completions` (no `openai` package needed).
-  `BackendConfig` carries optional `src_lang`/`tgt_lang` (e.g. `"English"`, `"Vietnamese"`)
-  which `VLLMBackendClient` uses to build the translation prompt; Triton ignores them.
+  `BackendClient.translate(text, model_name, src, tgt)` — `src`/`tgt` language codes are
+  passed through from the task so `VLLMBackendClient` can build a direction-aware prompt
+  without any per-direction config; Triton ignores `src`/`tgt`.
   `BackendConfig.type` also accepts `"hf"` but `registry.py:make_backend_client()` raises
   `ValueError` for it — reserved for a future HuggingFace direct backend. Add new backends by
   adding a file here and a case in `backends/registry.py:make_backend_client()`.

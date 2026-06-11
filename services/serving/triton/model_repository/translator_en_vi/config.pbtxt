@@ -33,7 +33,7 @@ dynamic_batching {
 # Reduce to count: 1 if VRAM is tight (< 4 GB free after loading both models).
 instance_group [
   {
-    count: 2
+    count: 1
     kind: KIND_GPU
   }
 ]

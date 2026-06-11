@@ -11,7 +11,7 @@ class TritonBackendClient:
     def __init__(self, url: str) -> None:
         self._url = url
 
-    def translate(self, text: str, model_name: str) -> str:
+    def translate(self, text: str, model_name: str, src: str = "", tgt: str = "") -> str:
         client = tritonhttp.InferenceServerClient(url=self._url)
 
         inp = tritonhttp.InferInput("INPUT_TEXT", [1, 1], "BYTES")

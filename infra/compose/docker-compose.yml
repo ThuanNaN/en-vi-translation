@@ -49,10 +49,14 @@ services:
       start_period: 90s
 
   traefik:
-    image: traefik:v3.3
+    image: traefik:v3.7.5
     ports:
       - "80:80"      # HTTP — main entry point for all external traffic
       - "8888:8080"  # Traefik dashboard (dev only — http://localhost:8888/dashboard/)
+    environment:
+      # Traefik's Docker SDK client defaults to negotiating at API v1.24, which this
+      # Docker daemon rejects (minimum 1.40).  Pin to the daemon's actual version.
+      DOCKER_API_VERSION: "1.54"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
@@ -143,8 +147,7 @@ services:
       BACKENDS: >-
         {"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
          "vi-en":{"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
-         "en-vi:llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"English","tgt_lang":"Vietnamese"},
-         "vi-en:llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B","src_lang":"Vietnamese","tgt_lang":"English"}}
+         "llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B"}}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2

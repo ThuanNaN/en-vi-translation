@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := help
 COMPOSE := docker compose --project-directory . -f infra/compose/docker-compose.yml
 
-.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down gateway-up gateway-down vllm-up vllm-down vllm-logs down remove logs api-logs worker-logs ui-logs traefik-logs ps ready smoke stress bench eval app-stress app-eval observe clean lint all prod-pull prod-up prod-down
+.PHONY: help build build-app build-ui export up api-up api-down ui-up ui-down gateway-up gateway-down vllm-up vllm-down vllm-logs down remove logs api-logs worker-logs ui-logs traefik-logs ps ready smoke stress bench eval app-stress app-eval vllm-stress app-stress-llm observe clean lint all prod-pull prod-up prod-down
 
 API_KEY     ?= changeme
 GATEWAY_TAG ?= v0.1.0
@@ -100,15 +100,23 @@ eval: ## Evaluate translation quality with BLEU/chrF on 5000 HF samples (needs: 
 		--eval-samples 5000 \
 		--concurrency 20
 
-app-stress: ## Stress-test the FastAPI app via gateway (needs: make api-up; override key with API_KEY=mykey)
+app-stress: ## Stress-test the FastAPI app via Triton NMT backend (needs: make api-up; override key with API_KEY=mykey)
 	python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key $(API_KEY)
 
-app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (needs: make api-up, pip install -e '.[eval]')
+app-eval: ## Evaluate FastAPI app quality with BLEU/chrF on 5000 HF samples (needs: make api-up, pip install datasets sacrebleu)
 	python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key $(API_KEY) \
 		--eval-dataset talmp/en-vi-translation \
 		--eval-samples 5000 \
 		--concurrency 20 \
 		--results-file results/app_eval_en_vi.json
+
+vllm-stress: ## Stress-test vLLM directly via OpenAI API (needs: make vllm-up)
+	python scripts/stresstest.py --target vllm --vllm-url localhost:8010 \
+		--requests 100 --concurrency 8 --text-size medium
+
+app-stress-llm: ## Stress-test FastAPI app routed through vLLM backend (needs: make api-up && make vllm-up)
+	python scripts/stresstest.py --target app --api-url http://localhost:80 --api-key $(API_KEY) \
+		--model llm --requests 50 --concurrency 4 --text-size medium
 
 observe: ## Start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
 	$(COMPOSE) up -d node-exporter dcgm-exporter prometheus grafana loki promtail
