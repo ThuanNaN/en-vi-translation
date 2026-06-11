@@ -1,0 +1,320 @@
+name: polyglot
+
+services:
+  triton:
+    build:
+      context: services/serving/triton
+      dockerfile: Dockerfile
+      args:
+        TRITON_VERSION: ${TRITON_VERSION:-24.12-py3}
+    image: polyglot/triton:local
+    command: >
+      tritonserver
+      --model-repository=/models
+      --model-control-mode=none
+    working_dir: /workspace
+    environment:
+      HF_MODEL_EN_VI: ${HF_MODEL_EN_VI:-Helsinki-NLP/opus-mt-en-vi}
+      HF_MODEL_VI_EN: ${HF_MODEL_VI_EN:-Helsinki-NLP/opus-mt-vi-en}
+    volumes:
+      - ./services/serving/triton/model_repository:/models
+      - ./services/serving/triton/scripts:/workspace/scripts
+      - hf-cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"   # HTTP / REST inference
+      - "8001:8001"   # gRPC inference
+      - "8002:8002"   # Prometheus metrics
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 8g
+        reservations:
+          cpus: "1.0"
+          memory: 2g
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: "1gb"
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready')"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+
+  traefik:
+    image: traefik:v3.3
+    ports:
+      - "80:80"      # HTTP — main entry point for all external traffic
+      - "8888:8080"  # Traefik dashboard (dev only — http://localhost:8888/dashboard/)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic:/etc/traefik/dynamic:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 64m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: services/gateway
+      dockerfile: Dockerfile
+    image: polyglot/app:local
+    # No host port binding — traffic enters via Traefik on port 80.
+    # Prometheus scrapes api:8080/metrics directly over the Docker network.
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      API_KEYS: ${API_KEYS:-changeme}
+    command: ["uvicorn", "polyglot_gateway.api.app:app", "--host", "0.0.0.0", "--port", "8080"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/translate`) || PathPrefix(`/jobs`) || Path(`/health`)"
+      - "traefik.http.routers.api.entrypoints=web"
+      - "traefik.http.routers.api.priority=10"
+      - "traefik.http.routers.api.middlewares=rate-limit@file,compress@file"
+      - "traefik.http.services.api.loadbalancer.server.port=8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      traefik:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  worker:
+    build:
+      context: services/gateway
+      dockerfile: Dockerfile
+    image: polyglot/app:local
+    ports:
+      - "9091:9091"   # Prometheus metrics
+    environment:
+      BACKENDS: >-
+        {"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+         "vi-en":{"type":"triton","url":"triton:8000","model_name":"translator_vi_en"}}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
+    command:
+      - celery
+      - -A
+      - polyglot_gateway.worker.celery_app:celery_app
+      - worker
+      - --loglevel=info
+      - -c
+      - "4"
+    depends_on:
+      triton:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
+
+  ui:
+    build:
+      context: services/ui
+      dockerfile: Dockerfile
+    image: polyglot/ui:local
+    # No host port binding — served at http://localhost/ via Traefik.
+    # The UI talks to the API over the internal Docker network (http://api:8080),
+    # bypassing Traefik entirely for backend calls.
+    environment:
+      API_URL: http://api:8080
+      API_KEY: ${API_KEYS:-changeme}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ui.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.ui.entrypoints=web"
+      - "traefik.http.routers.ui.priority=1"
+      - "traefik.http.services.ui.loadbalancer.server.port=7860"
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    command:
+      - '--path.rootfs=/host'
+    ports:
+      - "9100:9100"
+    pid: host
+    volumes:
+      - '/:/host:ro,rslave'
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 32m
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:4.4.0-4.5.0-ubuntu22.04
+    ports:
+      - "9400:9400"
+    cap_add:
+      - SYS_ADMIN
+    runtime: nvidia
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+          devices:
+            - capabilities: [gpu]
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 256m
+    depends_on:
+      - triton
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infra/observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+    depends_on:
+      - prometheus
+      - loki
+
+  loki:
+    image: grafana/loki:3.1.0
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./infra/observability/loki.yml:/etc/loki/local-config.yaml:ro
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1g
+        reservations:
+          cpus: "0.1"
+          memory: 128m
+
+  promtail:
+    image: grafana/promtail:3.1.0
+    volumes:
+      - ./infra/observability/promtail.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command: -config.file=/etc/promtail/config.yml
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128m
+        reservations:
+          cpus: "0.05"
+          memory: 64m
+    depends_on:
+      - loki
+
+volumes:
+  hf-cache:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  loki-data:

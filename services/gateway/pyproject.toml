@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "polyglot-gateway"
+version = "0.1.0"
+description = "API gateway + Celery worker for the EN↔VI translation platform"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.7",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "py3langid>=0.2",
+    "prometheus-client>=0.20",
+]
+worker = [
+    "celery[redis]>=5.3",
+    "redis>=5.0",
+    "prometheus-client>=0.20",
+    "tritonclient[http]>=2.40",
+    "numpy>=1.24",
+]
+dev = [
+    "polyglot-gateway[api,worker]",
+    "ruff>=0.4",
+    "pylint>=3.2",
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pylint.main]
+py-version = "3.10"
+jobs = 0
+recursive = true
+
+[tool.pylint."messages control"]
+disable = [
+    "missing-module-docstring",
+    "missing-class-docstring",
+    "missing-function-docstring",
+    "too-few-public-methods",
+    "too-many-arguments",
+    "too-many-instance-attributes",
+    "fixme",
+    "import-error",
+    "no-name-in-module",
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.pylint.design]
+max-args = 10
+max-attributes = 10
+
+[tool.pylint.similarities]
+min-similarity-lines = 10
+ignore-imports = true

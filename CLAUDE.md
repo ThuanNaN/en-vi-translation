@@ -4,182 +4,223 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-English↔Vietnamese Neural Machine Translation served on **Triton Inference Server** (ONNX
-Runtime + Python backend), fronted by a **Celery/Redis** queue and a **FastAPI** API. Full spec
-and decisions live in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — read it before making
-design changes.
+A multi-language Neural Machine Translation platform served on **Triton Inference Server** (ONNX
+Runtime + Python backend), fronted by a **Celery/Redis** queue and a **FastAPI** API. The
+architecture is designed to scale across serving backends (Triton, vLLM, HuggingFace) and
+language pairs without code changes.
 
-**Build status:** Phases 1–4 are complete. `src/envit5/worker/` and `src/envit5/api/` are
-implemented and tested. Prometheus metrics (Phase 4) are live: `src/envit5/core/metrics.py`
-centralises all metric objects; the API exposes them at `/metrics` and the Celery worker
-serves them on port 9091 via a background HTTP server. Still pending from Phase 4: structured
-error responses, per-request retries/timeouts at the API layer.
+## Repo layout (3-layer + infra)
+
+```
+services/
+├── gateway/          # Layer 2 — FastAPI + Celery worker + backend abstraction
+│   ├── src/polyglot_gateway/
+│   │   ├── api/      # FastAPI app, request/response models
+│   │   ├── worker/   # Celery app, tasks, chunker, backend clients
+│   │   │   └── backends/  # BackendClient abstraction (triton, vllm, ...)
+│   │   └── core/     # Settings, Prometheus metrics
+│   └── tests/
+├── ui/               # Layer 1 — Gradio demo frontend
+│   └── src/polyglot_ui/
+└── serving/
+    └── triton/       # Layer 3 — Triton Inference Server + model_repository
+        ├── model_repository/   # translator_en_vi/, translator_vi_en/
+        ├── scripts/            # export_models.py, smoke_test.py
+        └── Dockerfile
+
+infra/
+├── compose/          # docker-compose.yml + docker-compose.prod.yml
+├── traefik/          # traefik.yml + dynamic/middlewares.yml
+├── observability/    # prometheus.yml, loki.yml, promtail.yml, grafana/
+└── k8s/              # (future Kubernetes manifests)
+
+scripts/              # stresstest.py (end-to-end, targets running stack)
+Makefile              # top-level orchestration (COMPOSE points to infra/compose/)
+```
 
 ## Architecture (the parts that span files)
 
-- **One Triton Inference Server** hosts both translation models (`translator_en_vi` and
-  `translator_vi_en`) from `model_repository/`. Each model is a Python backend that runs
-  seq2seq generation via Optimum + ONNX Runtime. Adding a language pair = adding a new model
-  directory under `model_repository/` and a new `triton_model_*` field in `Settings`.
-- **Triton is called via `tritonclient.http`** in `src/envit5/worker/triton_client.py`.
-  `translate_via_triton(text, model_name)` sends one chunk as a `BYTES` tensor and returns
-  the decoded output string.
-- **Dynamic batching** is configured per model in `config.pbtxt`
-  (`max_queue_delay_microseconds: 100000`). Triton coalesces concurrent requests from all
-  four Celery workers into batches up to `max_batch_size: 16`.
-- **ONNX models are a build artifact** — export with `make export` before first run.
-  `make clean` removes them (must run inside Docker; files are root-owned by the container).
-- **Config is centralized** in `src/envit5/core/settings.py` (pydantic-settings, env prefix
-  `ENVIT5_`). Don't read env vars ad hoc elsewhere; add a field there. Use `get_settings()`
-  (the `@lru_cache` singleton) everywhere in application code — never instantiate `Settings()`
-  directly.
-- **Metrics are centralized** in `src/envit5/core/metrics.py`. All `Counter`/`Histogram`/`Gauge`
-  objects are defined there and imported wherever they're incremented. The API mounts
-  `make_metrics_asgi_app()` at `/metrics`; in the worker, `celery_app.py`'s `worker_init`
-  signal starts `start_http_server(9091)`. The worker uses prometheus_client **multiprocess
-  mode**: `PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc` is set in docker-compose so all four
-  prefork children write mmap files that the main process aggregates on each scrape. The
-  `worker_process_shutdown` signal calls `mark_process_dead` to clean up stale files. Do not
-  skip `PROMETHEUS_MULTIPROC_DIR` when adding worker containers; without it, prefork children's
-  metrics are invisible.
-- **Task autodiscovery** — `celery_app.py` calls `celery_app.autodiscover_tasks(["envit5.worker"])`
-  *after* `celery_app` is assigned as a module-level name. The call must come after assignment
-  (not inside `_make_celery()`) because the lazy signal Celery fires imports `tasks.py`, which
-  in turn does `from envit5.worker.celery_app import celery_app` — if `celery_app` isn't yet
-  assigned in the module namespace, that import fails. If you add new task modules in other
-  packages, add them to the `autodiscover_tasks` list. After any structural change here, always
-  verify `[tasks]` in the worker startup log is non-empty.
-- **API contract:** `POST /translate` (returns `job_id`) + `GET /jobs/{id}` (poll for result).
-  Auth via `X-API-Key` header. Direction via `source`/`target` fields or the `direction`
-  shorthand (`"en-vi"`); source auto-detected when both omitted (uses `py3langid`; only `en`
-  and `vi` are accepted). Request schema lives in `src/envit5/api/models.py` — `direction` and
-  `source`/`target` are mutually exclusive; providing both raises a 422.
-- **Long-text chunking** — `src/envit5/worker/chunker.py` splits input at sentence boundaries
-  into chunks ≤ 1 500 chars (≈ 350–420 tokens, safely under the model's 512-token ceiling).
-  Paragraph structure (blank-line gaps) is preserved and reassembled after translation. The
-  `chunk_text()` / `reassemble()` functions are the only place this logic lives — don't do
-  ad-hoc splitting elsewhere.
-- **Translation result caching** — the worker hashes `{src}-{tgt}:{text}` with SHA-256 and
-  caches the result in Redis db/0 under key `trans:<digest>` for `ENVIT5_CACHE_TTL_SECONDS`
-  (default 86 400 s = 24 h). Cache hits short-circuit Triton entirely.
-- **Job-submitted marker** — on `POST /translate` the API writes a short-lived `jobtrack:<id>`
-  key to Redis. `GET /jobs/{id}` uses this to distinguish "queued but not started" (Celery
-  PENDING + marker present) from "unknown job" (Celery PENDING + marker absent, returns 404).
-- **Gradio UI** — `src/envit5/ui/app.py` is a thin polling client over the REST API.
-  Configured via `ENVIT5_API_URL` (default `http://localhost:8080`) and `ENVIT5_API_KEY`
-  (default `changeme`). Start with `make ui-up`; runs on port 7860.
-- **Generation parameters** — `ENVIT5_MAX_NEW_TOKENS` (default 512) and `ENVIT5_NUM_BEAMS`
-  (default 1 = greedy) are passed through `Settings` and used inside `model.py` `.generate()`.
-  Beam search can be enabled by bumping `ENVIT5_NUM_BEAMS`.
+- **Backend registry** — the gateway maps each language pair to a serving backend via
+  `BACKENDS` (JSON). `Settings.backend_for(src, tgt)` returns a `BackendConfig`; the
+  worker calls `make_backend_client(config)` to get the right `BackendClient` implementation.
+  Adding a new language pair or swapping Triton for vLLM on a pair = env var change, no code.
+
+  ```bash
+  # Example: en-vi on Triton, vi-en on vLLM
+  BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+                    "vi-en":{"type":"vllm","url":"vllm:8000","model_name":"Helsinki-NLP/opus-mt-vi-en"}}'
+  ```
+
+- **BackendClient Protocol** — `services/gateway/src/polyglot_gateway/worker/backends/base.py`
+  defines `BackendClient(Protocol)` with one method: `translate(text, model_name) -> str`.
+  `backends/triton.py` implements it with `tritonclient.http`; `backends/vllm.py` exists but
+  raises `NotImplementedError` (OpenAI-compatible API stub, not yet wired). `BackendConfig.type`
+  also accepts `"hf"` in the type annotation but `registry.py:make_backend_client()` raises
+  `ValueError` for it — `"hf"` is reserved for a future HuggingFace direct backend. Add new
+  backends by adding a file here and a case in `backends/registry.py:make_backend_client()`.
+
+- **Config is centralized** in `services/gateway/src/polyglot_gateway/core/settings.py`
+  (pydantic-settings, no env prefix). Use `get_settings()` (the `@lru_cache` singleton)
+  everywhere — never instantiate `Settings()` directly. Supported language pairs come from
+  `settings.backends` keys — there is no separate `_SUPPORTED_PAIRS` list.
+
+- **Metrics are centralized** in `services/gateway/src/polyglot_gateway/core/metrics.py`.
+  All `Counter`/`Histogram`/`Gauge` objects are defined there and imported wherever incremented.
+  The API mounts `make_metrics_asgi_app()` at `/metrics`; the worker starts a Prometheus HTTP
+  server on port 9091 (`METRICS_PORT` env var — the one exception to the Settings rule,
+  read via `os.environ` in `celery_app.py` before full initialization). Prometheus multiprocess
+  mode: `PROMETHEUS_MULTIPROC_DIR=/tmp/prom_multiproc` must be set for worker containers.
+
+- **Task autodiscovery** — `celery_app.py` calls `autodiscover_tasks(["polyglot_gateway.worker"])`
+  *after* `celery_app` is assigned as a module-level name (circular-import safety). Always
+  verify `[tasks]` in the worker startup log is non-empty after structural changes.
+
+- **Celery task name is `polyglot.translate`** — do not rename; in-flight jobs in Redis would break.
+
+- **API contract:**
+  - `GET /health` — unauthenticated liveness probe, always returns `{"status": "ok"}`.
+  - `POST /translate` — returns `{"job_id": "..."}` (202 Accepted). Auth via `X-API-Key` header.
+    Direction via `source`/`target` fields or the `direction` shorthand (`"en-vi"`); source
+    auto-detected when both omitted (uses `py3langid`). `direction` and `source`/`target` are
+    mutually exclusive (422 if both). Validation calls `settings.backend_for()` — unknown
+    language pairs return 422.
+  - `GET /jobs/{id}` — poll for result. Status values: `pending`, `started`, `done`, `failed`.
+
+- **Long-text chunking** — `services/gateway/src/polyglot_gateway/worker/chunker.py` splits input
+  at sentence boundaries into chunks ≤ 1 500 chars. `chunk_text()` / `reassemble()` are the
+  only place this logic lives.
+
+- **Translation result caching** — SHA-256 of `{src}-{tgt}:{text}` → Redis key `trans:<digest>`,
+  TTL `CACHE_TTL_SECONDS` (default 24 h). Cache hits short-circuit the backend entirely.
+
+- **Job-submitted marker** — `POST /translate` writes `jobtrack:<id>` to Redis.
+  `GET /jobs/{id}` uses it to distinguish "queued" (Celery PENDING + marker present) from
+  "unknown job" (Celery PENDING + marker absent → 404).
+
+- **Triton models** — `services/serving/triton/model_repository/` holds Python backends that
+  run seq2seq via Optimum + ONNX Runtime. Dynamic batching: `max_queue_delay_microseconds:
+  100000`, `max_batch_size: 16`. ONNX is a build artifact — export with `make export` before
+  first run.
+
+- **Gradio UI** — `services/ui/src/polyglot_ui/app.py` is a thin polling client over the REST
+  API, configured via `API_URL` and `API_KEY`.
+
+- **Task time limits coupling** — `celery_app.py` sets `task_soft_time_limit=25` and
+  `task_time_limit=30`; `settings.py` has `request_timeout_seconds=30.0`. These are
+  intentionally matched. If you change `request_timeout_seconds`, update `celery_app.py` too.
 
 ## Build / run loop
 
-Triton requires ONNX models to be exported first — run `make export` once before `make up`.
-Models are cached in the `hf-cache` Docker volume so repeat exports skip the HuggingFace download.
+Triton requires ONNX models exported first — run `make export` once before `make up`. All
+`make` commands use `--project-directory .` so paths in `infra/compose/docker-compose.yml`
+are always relative to the repo root.
 
 ```bash
-make build      # build the Triton image (large: installs torch-cpu/transformers/optimum)
-make build-app  # build the API + worker image
-make build-ui   # build the Gradio demo UI image
-make export     # download HF checkpoints, export to ONNX into model_repository/*/1/onnx/
-make up         # start Triton Inference Server + Redis in the background
-make gateway-up # start Traefik API gateway (requires: make up)
+make build      # build the Triton image (large: installs torch/transformers/optimum)
+make build-app  # build the gateway image (API + worker)
+make build-ui   # build the Gradio UI image
+make export     # export HF checkpoints to ONNX into services/serving/triton/model_repository/*/1/onnx/
+make up         # start Triton + Redis
+make gateway-up # start Traefik API gateway
 make api-up     # start API + Celery worker (requires: make up && make gateway-up)
-make ui-up      # start Gradio demo UI at http://localhost/ via Traefik (requires: make api-up)
-make ready      # probe http://localhost:8000/v2/health/ready
-make smoke      # translate a sample both ways (needs: pip install -e '.[client]')
-make stress     # stress-test both models and print latency/throughput report
-make eval       # BLEU/chrF quality eval on 5000 HF dataset samples (needs: pip install -e '.[eval]')
-make app-stress # stress-test the FastAPI app (needs: make api-up; override key with API_KEY=mykey)
-make app-eval   # quality eval through FastAPI app
-make observe    # start full observability stack (Prometheus, Grafana, Loki, Promtail, node/DCGM exporters)
-make logs        # tail Triton logs
-make api-logs    # tail API logs
+make ui-up      # start Gradio demo UI at http://localhost/ (requires: make api-up)
+make ready      # probe Triton readiness
+make smoke      # translate a sample both ways
+make stress     # stress-test both models (latency/throughput)
+make bench      # GPU-saturation benchmark: async, long texts, high concurrency
+make eval       # BLEU/chrF quality eval on 5000 HF samples (needs: pip install -e '.[eval]')
+make app-stress # stress-test through FastAPI (needs: make api-up; override with API_KEY=mykey)
+make app-eval   # quality eval through FastAPI
+make observe    # start Prometheus + Grafana + Loki + Promtail + exporters
+make logs       # tail Triton logs
+make api-logs   # tail API logs
 make worker-logs # tail Celery worker logs
-make ui-logs     # tail Gradio UI logs
-make traefik-logs # tail Traefik gateway logs
+make ui-logs    # tail Gradio UI logs
+make traefik-logs # tail Traefik logs
 make ps         # show service status
 make api-down   # stop API + worker only
-make ui-down    # stop Gradio UI only
+make gateway-down # stop Traefik
+make ui-down    # stop Gradio UI
 make down       # stop and remove containers
-make remove     # stop and remove containers, volumes, images, and networks
-make clean      # delete exported ONNX artifacts — runs inside Docker because files are root-owned
-make all        # build-app + build-ui + up + gateway-up + api-up + ui-up + observe  (does NOT build Triton image or export ONNX models)
+make remove     # stop + remove containers, volumes, networks, and images
+make clean      # delete ONNX artifacts (runs inside Docker — root-owned files)
+make all        # build-app + build-ui + up + gateway-up + api-up + ui-up + observe
 ```
 
-**Production deploy** (uses pre-built GHCR images, no local build needed):
+**Production deploy** (separate image tags per service repo):
 
 ```bash
-make prod-pull IMAGE_TAG=v0.1.0  # pull triton/api/worker/ui images from GHCR
-make prod-up   IMAGE_TAG=v0.1.0  # start all services (overlays docker-compose.prod.yml)
-make prod-down                   # stop and remove prod containers
+make prod-pull GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0
+make prod-up   GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0
+make prod-down
 ```
 
-`make export` runs `scripts/export_models.py` *inside* the Triton image (so you don't need
-torch locally). HuggingFace checkpoints are cached in a Docker named volume (`hf-cache`), so
-repeat exports skip the download. To export only one direction: pass `--only translator_en_vi`
-(or `translator_vi_en`) to `scripts/export_models.py` directly. Override model ids via
-`ENVIT5_HF_MODEL_EN_VI` / `ENVIT5_HF_MODEL_VI_EN` (see `.env.example`). Bump
-`TRITON_VERSION` if the default base image tag isn't on nvcr.io.
+`make export` runs `scripts/export_models.py` *inside* the Triton container. HuggingFace
+checkpoints are cached in the `hf-cache` Docker volume so repeat exports skip the download.
+Bump `TRITON_VERSION` if the base image tag isn't on nvcr.io.
 
 ## Dev setup
 
-```bash
-pip install -e '.[dev]'      # ruff + pylint + pytest (includes api + worker + client)
-pip install -e '.[client]'   # tritonclient + numpy (for smoke_test.py)
-pip install -e '.[export]'   # ML deps — only on Python 3.10–3.12
-pip install -e '.[eval]'     # datasets + sacrebleu + tritonclient (for stresstest.py --eval-dataset)
-```
+Copy `.env.example` to `.env` and fill in secrets before first run.
 
-Run tests:
+**Gateway** (`services/gateway/`):
 
 ```bash
-pytest                        # run all tests
-pytest tests/api/             # run only api tests
-pytest tests/api/test_translate.py::test_submit_en_vi  # run a single test
+pip install -e '.[dev]'    # ruff + pylint + pytest (includes api + worker deps)
+pip install -e '.[worker]' # tritonclient + numpy + celery (for direct Triton calls)
 ```
 
-Lint and format:
+**UI** (`services/ui/`):
 
 ```bash
-ruff check .      # lint
-ruff format .     # auto-format
-pylint src/ tests/  # static analysis (or: make lint to run both)
+pip install -e .           # gradio + requests
 ```
+
+Run tests (from `services/gateway/`):
+
+```bash
+pytest                                              # all tests
+pytest tests/api/                                   # API tests only
+pytest tests/api/test_translate.py::test_submit_en_vi  # single test
+```
+
+Lint (`make lint` runs `ruff check` + `pylint` only; run `ruff format` separately):
+
+```bash
+ruff check .               # from services/gateway/, or: make lint
+pylint src/ tests/
+ruff format .              # not included in make lint — run manually
+```
+
+For `make stress` / `make bench` (direct Triton calls): `pip install -e '.[worker]'` from
+`services/gateway/` satisfies the `tritonclient[http]` + `numpy` requirement.
+For `make eval` / `make app-eval`: additionally `pip install datasets sacrebleu`.
 
 ## Conventions / gotchas
 
-- **Exported ONNX is a build artifact**, git-ignored (`model_repository/**/onnx/`). Never commit
-  it; regenerate with `make export`. `model.py` + `config.pbtxt` are the tracked source.
-  `make clean` must run inside Docker because the files are written by a root-owned container.
-- **Gateway ports:** Traefik `80` (HTTP entry), `8888` (dashboard — dev only at `http://localhost:8888/dashboard/`).
-  Static config: `docker/traefik/traefik.yml`; middleware definitions: `docker/traefik/dynamic/middlewares.yml`.
-  Rate limiting (100 req/s burst 50) and gzip compression are applied on all API routes.
-  `X-API-Key` auth stays in FastAPI — it is application-level, not a gateway concern.
-  `/metrics` is NOT routed through Traefik; Prometheus scrapes services directly over the Docker network.
-  Traefik exposes its own metrics at `traefik:8899` (internal, not host-mapped).
+- **Exported ONNX is a build artifact**, git-ignored (`services/serving/triton/**/onnx/`).
+  `make clean` must run inside Docker because files are written by a root-owned container.
+- **`BACKENDS` JSON** is the single source of truth for which language pairs are live and
+  which backend serves each. The API's 422 validation reads from this at request time.
+- **Gateway ports:** Traefik `80` (HTTP entry), `8888` (dashboard). Static config:
+  `infra/traefik/traefik.yml`; rate-limit + gzip: `infra/traefik/dynamic/middlewares.yml`.
+  `/metrics` is NOT routed through Traefik — Prometheus scrapes services directly.
 - **Triton ports:** `8000` HTTP, `8001` gRPC, `8002` Prometheus metrics.
-- **App ports:** API `8080` (internal only — no host binding), worker Prometheus metrics `9091`.
-- **Observability ports:** Prometheus `9090`, Grafana `3000`, Loki `3100`. Grafana default
-  credentials `admin/admin` (override via `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`).
-  The `envit5-app` Grafana dashboard (uid `envit5-app`) is auto-provisioned from
-  `docker/grafana/provisioning/dashboards/envit5-app.json`.
-- GPU support requires the **NVIDIA driver + NVIDIA Container Toolkit** on the host. The
-  compose file passes `count: 1` GPU to Triton; both `config.pbtxt` files use `KIND_GPU`.
-  `onnxruntime-gpu` (in the Dockerfile) picks up `CUDAExecutionProvider` automatically.
-  CUDA torch (`cu124` wheel) is required for Optimum IO binding (GPU output buffer allocation).
-- Host Python is 3.14, but ML deps run in containers; the export venv (if run locally instead of
-  via Docker) should be Python 3.10–3.12 where torch/transformers wheels are reliable.
-- **Redis DB layout:** `db/0` = result cache, `db/1` = Celery broker, `db/2` = Celery result
-  backend. All three URLs are configurable via `ENVIT5_REDIS_URL` / `ENVIT5_CELERY_*`.
-- `ENVIT5_API_KEYS` accepts a comma-separated string (e.g. `key1,key2`) or a JSON list. If the
-  env var is unset the list is empty and **all requests are rejected** (the auth check treats an
-  empty key list as "no valid keys configured" rather than "auth disabled").
-- **Test isolation:** `tests/conftest.py` patches all service URLs to safe defaults and calls
-  `get_settings.cache_clear()` before and after every test — required because `get_settings` is
-  `@lru_cache`. Tests mock `translate_task.delay` so they never need a running broker.
-- **`make stress` vs `make eval`:** `stress` measures latency/throughput with synthetic load;
-  `eval` runs `stresstest.py --eval-dataset` against the HuggingFace dataset and reports BLEU/chrF.
-  Both have `app-*` counterparts that drive the FastAPI layer instead of Triton directly.
-- **GitHub Actions:** `.github/workflows/build.yml` builds and pushes Docker images to GHCR on
-  merge to `main`; `.github/workflows/tag.yml` auto-tags the release on `main`.
+- **App ports:** API `8080` (internal, Traefik-routed), worker metrics `9091`.
+- **Observability ports:** Prometheus `9090`, Grafana `3000`, Loki `3100`. Dashboards are
+  auto-provisioned from `infra/observability/grafana/provisioning/`. Grafana credentials:
+  `admin/admin` (override via `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`).
+- **Redis DB layout:** `db/0` = result cache + job markers, `db/1` = Celery broker,
+  `db/2` = Celery result backend. Redis key prefixes `trans:` and `jobtrack:` must not change.
+- `API_KEYS` accepts a comma-separated string (`key1,key2`) or a JSON list. Empty list
+  = **all requests rejected**.
+- **Test isolation:** `services/gateway/tests/conftest.py` patches `BACKENDS` (as JSON)
+  and Redis URLs, then calls `get_settings.cache_clear()` before/after each test.
+  Tests mock `translate_task.delay` — no broker needed.
+- **GPU support** requires NVIDIA driver + Container Toolkit. Compose passes `count: 1` GPU to
+  Triton; `config.pbtxt` uses `KIND_GPU`. CPU-only mode: change `KIND_GPU` to `KIND_CPU`.
+- **GitHub Actions:** `.github/workflows/build.yml` builds gateway/UI/Triton images → GHCR;
+  `.github/workflows/tag.yml` auto-tags on push to `main`.
+- **`triton_infer_duration_seconds` metric** is defined in `core/metrics.py` but currently
+  has no incrementer — `triton_client.py` was removed during the backend-abstraction refactor.
+  Wire it up in `backends/triton.py` if per-chunk Triton latency tracking is needed.

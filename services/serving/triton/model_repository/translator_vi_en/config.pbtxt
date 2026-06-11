@@ -1,0 +1,50 @@
+name: "translator_vi_en"
+backend: "python"
+max_batch_size: 32
+
+input [
+  {
+    name: "INPUT_TEXT"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+output [
+  {
+    name: "OUTPUT_TEXT"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+# Let Triton coalesce concurrent requests into a single batch (up to ~max_batch_size)
+# before invoking the model. Keep the queue delay small to bound latency.
+# preferred_batch_size tells the scheduler to prefer filling to these sizes before
+# dispatching early — helps GPU utilisation under concurrent load.
+dynamic_batching {
+  preferred_batch_size: [ 8, 16, 32 ]
+  max_queue_delay_microseconds: 100000
+}
+
+# count: 2 lets Triton dispatch to a second Python process while the first is busy
+# tokenizing or decoding on CPU, overlapping CPU work with GPU compute on the other
+# instance. opus-mt ONNX weights are ~250 MB so two instances fit easily on any GPU.
+# Reduce to count: 1 if VRAM is tight (< 4 GB free after loading both models).
+instance_group [
+  {
+    count: 2
+    kind: KIND_GPU
+  }
+]
+
+parameters [
+  {
+    key: "max_new_tokens"
+    value: { string_value: "512" }
+  },
+  {
+    key: "num_beams"
+    value: { string_value: "1" }
+  }
+]

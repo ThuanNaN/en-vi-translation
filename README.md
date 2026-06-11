@@ -1,56 +1,81 @@
-# en-vi-translation
+# Polyglot
 
-English ↔ Vietnamese Neural Machine Translation served on **Triton Inference Server**, with async job dispatch via **Celery + Redis**, a **FastAPI** REST API, a **Traefik** API gateway, and a **Gradio** demo UI.
-
-## Architecture
+Multilingual Neural Machine Translation platform — pluggable serving backends, async job dispatch, and a production-ready API gateway.
 
 ```
-                    Traefik :80
-                    ┌──────────────────────────────────────┐
+                      Traefik :80
+                      ┌──────────────────────────────────────────────┐
 client ─POST /translate─▶ FastAPI ──enqueue──▶ Redis (broker) ──▶ Celery worker
-   ▲                         │ (returns job_id)                        │ tritonclient
-   └──GET /jobs/{id}─────────┘                                         ▼
-                 Redis (result cache + Celery backend) ◀──────────── Triton
-                                                         (translator_en_vi,
-  Prometheus ◀─ metrics (api:8080, worker:9091, triton:8002)   translator_vi_en)
-       └──▶ Grafana :3000
+   ▲                         │ (returns job_id)                         │
+   └──GET /jobs/{id}─────────┘                                          ▼
+                 Redis (result cache + Celery backend)         BackendClient
+                                                              ┌────────────────┐
+  Prometheus ◀─ /metrics (api:8080, worker:9091, triton:8002) │ Triton  :8000  │
+       └──▶ Grafana :3000                                     │ vLLM    :8000  │ ← future
+                                                              │ HF      :8000  │ ← future
+                                                              └────────────────┘
 ```
 
-- **Two single-direction models** — `Helsinki-NLP/opus-mt-en-vi` and `Helsinki-NLP/opus-mt-vi-en`, exported to ONNX and loaded via the Triton Python backend with Optimum `ORTModelForSeq2SeqLM`.
+## Repo layout
+
+```
+services/
+├── gateway/          # FastAPI + Celery worker (polyglot_gateway package)
+├── ui/               # Gradio demo frontend (polyglot_ui package)
+└── serving/
+    └── triton/       # Triton Inference Server + ONNX model_repository
+
+infra/
+├── compose/          # docker-compose.yml + docker-compose.prod.yml
+├── traefik/          # reverse proxy config
+└── observability/    # Prometheus, Grafana, Loki, Promtail
+```
+
+## Key design decisions
+
+- **Backend registry** — `BACKENDS` (JSON env var) maps each language pair to a serving backend. Adding a language pair or swapping backends requires no code change:
+
+  ```bash
+  BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
+             "vi-en":{"type":"vllm","url":"vllm:8000","model_name":"Helsinki-NLP/opus-mt-vi-en"}}'
+  ```
+
 - **Async API** — `POST /translate` enqueues a job and returns a `job_id`; `GET /jobs/{id}` polls for the result. Auth via `X-API-Key` header.
-- **Direction routing** — explicit `source`/`target` (or `direction: "en-vi"`), with automatic source-language detection as fallback.
+
 - **Long-text chunking** — input is split at sentence boundaries into ≤ 1 500-char chunks and reassembled after translation.
-- **Redis caching** — results are cached by `sha256(direction:text)` for 24 h, short-circuiting Triton entirely on cache hits.
-- **Traefik gateway** — rate-limited (100 req/s, burst 50) and gzip-compressed. Routes `/translate`, `/jobs`, and `/health` to the API; routes `/` to the Gradio UI.
-- **Prometheus metrics** — HTTP request rate/latency, translation throughput/latency, cache hit rate, and active-job gauge. Grafana dashboard auto-provisioned as `EN↔VI Translation Service`.
+
+- **Redis caching** — results are cached by `sha256(direction:text)` for 24 h, short-circuiting the backend entirely on hits.
+
+- **Traefik gateway** — rate-limited (100 req/s, burst 50) and gzip-compressed.
+
+- **Prometheus metrics** — HTTP rate/latency, translation throughput/latency, cache hit rate, active-job gauge. Grafana dashboards auto-provisioned.
 
 ## Quick start
 
 ```bash
-# 1. Build images and export models (one-time; downloads ~500 MB of HF weights)
-make build        # Triton image
-make build-app    # API + worker image
+# 1. Build images and export ONNX models (one-time; downloads ~500 MB of HF weights)
+make build        # Triton image (~30 min, installs torch + optimum)
+make build-app    # gateway image (API + worker)
 make export       # export HF checkpoints to ONNX (runs inside Triton container)
 
 # 2. Start all services
 make up           # Triton + Redis
-make gateway-up   # Traefik API gateway
+make gateway-up   # Traefik
 make api-up       # FastAPI + Celery worker
-make ui-up        # Gradio demo UI (optional)
-make observe      # Prometheus + Grafana + Loki stack (optional)
+make ui-up        # Gradio demo (optional)
+make observe      # Prometheus + Grafana + Loki (optional)
 
 # 3. Smoke-test
-pip install -e '.[client]'
-make smoke        # translates a sample sentence each direction
+make smoke        # translates a sample sentence via Triton directly
 
 # 4. Open
-#    API docs  → http://localhost/docs
-#    Gradio UI → http://localhost/
-#    Grafana   → http://localhost:3000  (admin / admin)
-#    Traefik   → http://localhost:8888/dashboard/
+#   API docs  → http://localhost/docs
+#   Gradio UI → http://localhost/
+#   Grafana   → http://localhost:3000  (admin / admin)
+#   Traefik   → http://localhost:8888/dashboard/
 ```
 
-Or start everything in one shot (skips Triton build and ONNX export):
+Start everything in one shot (skips Triton build and ONNX export):
 
 ```bash
 make all
@@ -58,12 +83,12 @@ make all
 
 ## Production deploy
 
-Uses pre-built images from GHCR — no local build required:
+Uses pre-built GHCR images — each service repo versions independently:
 
 ```bash
-make prod-pull IMAGE_TAG=v0.1.0   # pull images
-make prod-up   IMAGE_TAG=v0.1.0   # start all services
-make prod-down                     # stop and remove
+make prod-pull GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0
+make prod-up   GATEWAY_TAG=v0.2.0 UI_TAG=v0.1.1 TRITON_TAG=v0.1.0
+make prod-down
 ```
 
 ## API
@@ -71,7 +96,7 @@ make prod-down                     # stop and remove
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
 | `/translate` | POST | `X-API-Key` | Submit translation job, returns `{ job_id }` |
-| `/jobs/{job_id}` | GET | `X-API-Key` | Poll job status: `pending` / `started` / `done` / `failed` |
+| `/jobs/{job_id}` | GET | `X-API-Key` | Poll status: `pending` / `started` / `done` / `failed` |
 | `/health` | GET | — | Liveness check |
 | `/metrics` | GET | — | Prometheus metrics (not routed through Traefik) |
 
@@ -79,43 +104,35 @@ make prod-down                     # stop and remove
 ```json
 { "text": "Hello world", "source": "en", "target": "vi" }
 ```
-Or use the `direction` shorthand (`"en-vi"` / `"vi-en"`), or omit both for auto-detection.
+Or use the `direction` shorthand (`"en-vi"`), or omit both for auto-detection.
 
 ## Development
 
 ```bash
-pip install -e '.[dev]'   # ruff + pylint + pytest
+# From services/gateway/
+pip install -e '.[dev]'    # ruff + pylint + pytest + api + worker deps
 
-pytest                    # run all tests
-pytest tests/api/test_translate.py::test_submit_en_vi  # single test
+pytest                                                      # all tests
+pytest tests/api/test_translate.py::test_submit_en_vi      # single test
 
-ruff check . && ruff format .   # lint + format
-make lint                       # ruff + pylint
+ruff check . && ruff format .                               # lint + format
+make lint                                                   # ruff + pylint via Makefile
 ```
 
-## Makefile targets
+## Configuration
 
-| Target | Description |
-|---|---|
-| `make build` | Build Triton image (installs torch/transformers/optimum) |
-| `make build-app` | Build API + worker image |
-| `make build-ui` | Build Gradio UI image |
-| `make export` | Export HF checkpoints to ONNX (runs inside Triton container) |
-| `make up` / `make down` | Start / stop Triton + Redis |
-| `make gateway-up` / `make gateway-down` | Start / stop Traefik gateway |
-| `make api-up` / `make api-down` | Start / stop API + worker |
-| `make ui-up` / `make ui-down` | Start / stop Gradio UI |
-| `make observe` | Start Prometheus, Grafana, Loki, Promtail, exporters |
-| `make all` | Build app/UI images and start all services |
-| `make smoke` | Quick end-to-end translation test |
-| `make stress` | Latency/throughput benchmark against Triton directly |
-| `make eval` | BLEU/chrF quality eval on 5000 HF samples (Triton) |
-| `make app-stress` | Benchmark through the FastAPI layer (`API_KEY=mykey`) |
-| `make app-eval` | BLEU/chrF quality eval through FastAPI layer |
-| `make logs` / `make api-logs` / `make worker-logs` / `make traefik-logs` | Tail service logs |
-| `make prod-pull` / `make prod-up` / `make prod-down` | Production deploy from GHCR |
-| `make clean` | Delete exported ONNX artifacts |
-| `make remove` | Remove containers, volumes, images, and networks |
+Copy `.env.example` to `.env` to get started.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_KEYS` | — | Comma-separated API keys (**required**; empty = all requests rejected) |
+| `BACKENDS` | Triton en↔vi | JSON map of language pair → backend config |
+| `REDIS_URL` | `redis://localhost:6379/0` | Result cache |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/1` | Task queue |
+| `CACHE_TTL_SECONDS` | `86400` | Translation cache TTL (24 h) |
+| `MAX_NEW_TOKENS` | `512` | Generation token limit |
+| `NUM_BEAMS` | `1` | Beam search width (1 = greedy) |
+| `GRAFANA_ADMIN_PASSWORD` | `admin` | Grafana password |
 
 ## Ports
 
@@ -131,18 +148,10 @@ make lint                       # ruff + pylint
 | Grafana | 3000 |
 | Loki | 3100 |
 
-The API (`8080`) has no host binding — traffic enters via Traefik on port 80.
+The API (`8080`) has no host binding — all traffic enters via Traefik on port 80.
 
-## Configuration
+## Adding a new language pair or backend
 
-All settings use the `ENVIT5_` prefix (pydantic-settings, can also be set via `.env`). Copy `.env.example` to `.env` to get started.
-
-| Variable | Default | Description |
-|---|---|---|
-| `ENVIT5_API_KEYS` | — | Comma-separated API keys (required) |
-| `ENVIT5_TRITON_HTTP_URL` | `localhost:8000` | Triton HTTP endpoint |
-| `ENVIT5_REDIS_URL` | `redis://localhost:6379/0` | Result cache URL |
-| `ENVIT5_CACHE_TTL_SECONDS` | `86400` | Translation cache TTL |
-| `ENVIT5_MAX_NEW_TOKENS` | `512` | Generation limit |
-| `ENVIT5_NUM_BEAMS` | `1` | Beam search width (1 = greedy) |
-| `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` | `admin` / `admin` | Grafana credentials |
+1. Deploy a serving container (Triton, vLLM, or HuggingFace Inference).
+2. Add an entry to `BACKENDS` — no gateway code change needed.
+3. (Triton only) Add model directory under `services/serving/triton/model_repository/` and run `make export`.
