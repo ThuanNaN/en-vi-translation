@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/gateway
+        working-directory: apps/api
 
     steps:
       - name: Checkout
@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: services/gateway/pyproject.toml
+          cache-dependency-path: apps/api/pyproject.toml
 
       - name: Install dependencies
         run: pip install -e '.[dev]'
@@ -58,11 +58,11 @@ jobs:
       matrix:
         include:
           - name: app
-            context: services/gateway
-            dockerfile: services/gateway/Dockerfile
+            context: apps/api
+            dockerfile: apps/api/Dockerfile
           - name: ui
-            context: services/ui
-            dockerfile: services/ui/Dockerfile
+            context: apps/ui
+            dockerfile: apps/ui/Dockerfile
 
     steps:
       - name: Checkout
@@ -151,8 +151,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: services/serving/triton
-          file: services/serving/triton/Dockerfile
+          context: inference/triton
+          file: inference/triton/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

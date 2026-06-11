@@ -3,20 +3,28 @@
 Every field can be overridden with a plain environment variable
 (e.g. ``REDIS_URL=redis://redis:6379/0``) or via a local ``.env`` file.
 
-Backend registry — add a new language pair without code changes:
-    BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"}}'
-Supported types: "triton" (tritonclient.http), "vllm" (OpenAI-compatible API).
+Backend registry — three ways to configure (highest priority first):
+  1. BACKENDS env var (JSON):
+       BACKENDS='{"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"}}'
+  2. BACKENDS_CONFIG env var pointing to a YAML file (default: configs/models.yaml):
+       BACKENDS_CONFIG=/path/to/models.yaml
+  3. Hardcoded defaults (localhost Triton, dev only).
+
+Supported types: "triton" (tritonclient.http), "vllm" (OpenAI-compatible API),
+                 "custom" (plain HTTP /translate endpoint), "hf" (reserved).
 """
 
 from __future__ import annotations
+import os
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, PydanticBaseSettingsSource, SettingsConfigDict
 
 
 class BackendConfig(BaseModel):
-    type: Literal["triton", "vllm", "hf"]
+    type: Literal["triton", "vllm", "hf", "custom"]
     url: str
     model_name: str
 
@@ -89,6 +97,24 @@ class Settings(BaseSettings):
             + (f" model={model!r}" if model else "")
             + f". Configured: {supported}"
         )
+
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        **_kwargs: object,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Load order: env vars > .env file > YAML config file > hardcoded defaults."""
+        sources: list[PydanticBaseSettingsSource] = [init_settings, env_settings, dotenv_settings]
+        yaml_file = Path(os.environ.get("BACKENDS_CONFIG", "configs/models.yaml"))
+        if yaml_file.exists():
+            from pydantic_settings import YamlConfigSettingsSource  # lazy: needs pyyaml
+            sources.append(YamlConfigSettingsSource(settings_cls, yaml_file=yaml_file))
+        return tuple(sources)
 
 
 @lru_cache

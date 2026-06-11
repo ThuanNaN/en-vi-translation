@@ -15,7 +15,7 @@ from polyglot_gateway.core.metrics import (
     translations_total,
 )
 from polyglot_gateway.core.settings import get_settings
-from polyglot_gateway.worker.backends import make_backend_client
+from polyglot_gateway.inference import make_backend_client
 from polyglot_gateway.worker.celery_app import celery_app
 from polyglot_gateway.worker.chunker import chunk_text, reassemble
 

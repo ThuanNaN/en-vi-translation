@@ -1,5 +1,5 @@
 """
-Stress test and quality evaluation for translation endpoints.
+Stress test for translation endpoints.
 
 Triton backend (direct, default):
     pip install -e '.[worker]'   # tritonclient + numpy
@@ -22,17 +22,8 @@ FastAPI app backend — LLM (vLLM):
     python scripts/stresstest.py --target app --api-key changeme --model llm
     python scripts/stresstest.py --target app --api-key changeme --model llm --direction vi-en
 
-Quality evaluation (BLEU) using a HuggingFace dataset:
-    pip install datasets sacrebleu
-    python scripts/stresstest.py --eval-dataset talmp/en-vi-translation --eval-samples 1000
-    python scripts/stresstest.py --target app --api-key changeme \
-        --eval-dataset talmp/en-vi-translation --eval-samples 1000
-
-Save all translation results to a JSON file:
-    python scripts/stresstest.py --eval-dataset talmp/en-vi-translation \
-        --results-file results/eval_en_vi.json
-    python scripts/stresstest.py --target app --api-key changeme \
-        --eval-dataset talmp/en-vi-translation --results-file results/app_eval.json
+Save results to a JSON file:
+    python scripts/stresstest.py --results-file results/stress_en_vi.json
 """
 
 from __future__ import annotations
@@ -40,7 +31,6 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
-import random
 import statistics
 import sys
 import threading
@@ -50,8 +40,6 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
-
-_RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
 _SAMPLE_TEXTS: dict[str, list[str]] = {
     "translator_en_vi": [
@@ -257,12 +245,6 @@ _TEXT_POOLS: dict[str, dict[str, list[str]]] = {
     "short": _SAMPLE_TEXTS,
     "medium": _MEDIUM_TEXTS,
     "long": _LONG_TEXTS,
-}
-
-_DATASET_COLS: dict[str, tuple[str, str]] = {
-    # talmp/en-vi-translation uses "input" and "output".
-    "translator_en_vi": ("input", "output"),
-    "translator_vi_en": ("output", "input"),
 }
 
 _MODEL_TO_DIRECTION: dict[str, str] = {
@@ -618,190 +600,6 @@ def run_stress(
 
 
 # ---------------------------------------------------------------------------
-# Quality evaluation
-# ---------------------------------------------------------------------------
-
-def _load_eval_pairs(
-    dataset_name: str,
-    model_name: str,
-    n_samples: int,
-    split: str,
-    seed: int,
-) -> tuple[list[str], list[str]]:
-    try:
-        from datasets import load_dataset  # type: ignore[import-untyped]
-    except ImportError:
-        print(
-            "datasets package not found. Install with: pip install -e '.[eval]'",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    src_col, ref_col = _DATASET_COLS[model_name]
-
-    _RAW_DIR.mkdir(parents=True, exist_ok=True)
-
-    print(
-        f"[eval] Loading '{dataset_name}' "
-        f"(split={split}), cache={_RAW_DIR}, sampling {n_samples} rows ...",
-        file=sys.stderr,
-        flush=True,
-    )
-
-    ds = load_dataset(dataset_name, split=split, cache_dir=str(_RAW_DIR))
-
-    missing_cols = [col for col in [src_col, ref_col] if col not in ds.column_names]
-    if missing_cols:
-        raise ValueError(
-            f"Dataset '{dataset_name}' does not contain required columns: {missing_cols}. "
-            f"Available columns: {ds.column_names}"
-        )
-
-    rng = random.Random(seed)
-    indices = rng.sample(range(len(ds)), min(n_samples, len(ds)))
-    sample = ds.select(indices)
-
-    sources = [str(row[src_col]) for row in sample]
-    references = [str(row[ref_col]) for row in sample]
-
-    return sources, references
-
-
-def _eval_worker(
-    translate_fn: Callable[[str], str],
-    text: str,
-) -> tuple[str, float, str | None]:
-    t0 = time.perf_counter()
-
-    try:
-        hyp = translate_fn(text)
-        return hyp, time.perf_counter() - t0, None
-    except Exception as exc:
-        return "", time.perf_counter() - t0, str(exc)
-
-
-def run_eval(
-    translate_fn: Callable[[str], str],
-    model_name: str,
-    dataset_name: str,
-    n_samples: int,
-    split: str,
-    seed: int,
-    concurrency: int,
-    collect_translations: bool = False,
-) -> dict:
-    try:
-        import sacrebleu  # type: ignore[import-untyped]
-    except ImportError:
-        print(
-            "sacrebleu not found. Install with: pip install -e '.[eval]'",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-    sources, references = _load_eval_pairs(
-        dataset_name=dataset_name,
-        model_name=model_name,
-        n_samples=n_samples,
-        split=split,
-        seed=seed,
-    )
-
-    n = len(sources)
-
-    hypotheses: list[str] = [""] * n
-    latencies: list[float] = []
-    errors: list[str] = []
-
-    per_item_latencies: list[float] = [0.0] * n
-    per_item_errors: list[str | None] = [None] * n
-
-    print(
-        f"[eval] Translating {n} sentences with {model_name} "
-        f"(concurrency={concurrency}) ...",
-        file=sys.stderr,
-        flush=True,
-    )
-
-    t_start = time.perf_counter()
-
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        future_to_idx = {
-            pool.submit(_eval_worker, translate_fn, src): i
-            for i, src in enumerate(sources)
-        }
-
-        done = 0
-
-        for fut in as_completed(future_to_idx):
-            idx = future_to_idx[fut]
-
-            hyp, latency, err = fut.result()
-
-            hypotheses[idx] = hyp
-            per_item_latencies[idx] = latency
-            latencies.append(latency)
-
-            if err:
-                errors.append(err)
-                per_item_errors[idx] = err
-
-            done += 1
-
-            if done % 100 == 0 or done == n:
-                print(f"[eval] {done}/{n} translated ...", file=sys.stderr, flush=True)
-
-    total_seconds = time.perf_counter() - t_start
-
-    valid_hyps: list[str] = []
-    valid_refs: list[str] = []
-
-    for i, hyp in enumerate(hypotheses):
-        if hyp:
-            valid_hyps.append(hyp)
-            valid_refs.append(references[i])
-
-    bleu_score = None
-    chrf_score = None
-
-    if valid_hyps:
-        bleu_score = sacrebleu.corpus_bleu(valid_hyps, [valid_refs]).score
-        chrf_score = sacrebleu.corpus_chrf(valid_hyps, [valid_refs]).score
-
-    result: dict = {
-        "mode": "eval",
-        "model": model_name,
-        "dataset": dataset_name,
-        "n_samples": n,
-        "n_valid": len(valid_hyps),
-        "concurrency": concurrency,
-        "total_seconds": total_seconds,
-        "latencies": latencies,
-        "errors": errors,
-        "bleu": bleu_score,
-        "chrf": chrf_score,
-        "sources": sources[:5],
-        "references": references[:5],
-        "hypotheses": [hypotheses[i] for i in range(min(5, n))],
-    }
-
-    if collect_translations:
-        result["translations"] = [
-            {
-                "index": i,
-                "source": sources[i],
-                "reference": references[i],
-                "hypothesis": hypotheses[i],
-                "latency_s": round(per_item_latencies[i], 4),
-                **({"error": per_item_errors[i]} if per_item_errors[i] else {}),
-            }
-            for i in range(n)
-        ]
-
-    return result
-
-
-# ---------------------------------------------------------------------------
 # Report builder
 # ---------------------------------------------------------------------------
 
@@ -823,16 +621,12 @@ def build_report(results: list[dict]) -> str:
     lines: list[str] = []
 
     lines.append("=" * width)
-    lines.append("  STRESS / QUALITY EVALUATION REPORT")
+    lines.append("  STRESS TEST REPORT")
     lines.append("=" * width)
 
     for r in results:
         lines.append("")
-
-        if r.get("mode") == "eval":
-            _append_eval_section(lines, r, width)
-        else:
-            _append_stress_section(lines, r, width)
+        _append_stress_section(lines, r, width)
 
     return "\n".join(lines)
 
@@ -864,57 +658,6 @@ def _append_stress_section(lines: list[str], r: dict, width: int) -> None:
             f"   p99  {_percentile(lats, 99):.3f}"
             f"   max  {max(lats):.3f}"
         )
-
-    if r["errors"]:
-        lines.append(f"First error  : {r['errors'][0]}")
-
-    lines.append("-" * width)
-
-
-def _append_eval_section(lines: list[str], r: dict, width: int) -> None:
-    n = r["n_samples"]
-    n_ok = r["n_valid"]
-    n_err = len(r["errors"])
-    lats = r["latencies"]
-
-    lines.append(f"Model        : {r['model']}")
-
-    if r.get("backend"):
-        lines.append(f"Backend      : {r['backend']}")
-
-    lines.append(f"Dataset      : {r['dataset']}")
-    lines.append(f"Samples      : {n}  (concurrency={r['concurrency']})")
-    lines.append(f"Succeeded    : {n_ok}   Failed: {n_err}")
-    lines.append(f"Duration     : {r['total_seconds']:.2f} s")
-
-    if r["total_seconds"] > 0:
-        lines.append(f"Throughput   : {n / r['total_seconds']:.2f} req/s")
-
-    if lats:
-        lines.append("Latency (s)  :")
-        lines.append(f"  min  {min(lats):.3f}   mean {statistics.mean(lats):.3f}")
-        lines.append(
-            f"  p50  {_percentile(lats, 50):.3f}"
-            f"   p95  {_percentile(lats, 95):.3f}"
-            f"   p99  {_percentile(lats, 99):.3f}"
-            f"   max  {max(lats):.3f}"
-        )
-
-    lines.append("Quality      :")
-
-    if r["bleu"] is not None:
-        lines.append(f"  BLEU  {r['bleu']:.2f}")
-        lines.append(f"  chrF  {r['chrf']:.2f}")
-    else:
-        lines.append("  no valid translations to score")
-
-    lines.append("Examples (first 5) :")
-
-    for src, ref, hyp in zip(r["sources"], r["references"], r["hypotheses"]):
-        lines.append(f"  SRC : {src[:80]}")
-        lines.append(f"  REF : {ref[:80]}")
-        lines.append(f"  HYP : {hyp[:80]}")
-        lines.append("")
 
     if r["errors"]:
         lines.append(f"First error  : {r['errors'][0]}")
@@ -1097,37 +840,6 @@ def main() -> None:
         ),
     )
 
-    eval_grp = parser.add_argument_group(
-        "quality evaluation, requires pip install -e '.[eval]'"
-    )
-    eval_grp.add_argument(
-        "--eval-dataset",
-        metavar="HF_DATASET",
-        default=None,
-        help=(
-            "HuggingFace dataset to use for BLEU / chrF evaluation, "
-            "for example talmp/en-vi-translation. "
-            "When set, switches to quality-eval mode instead of stress mode."
-        ),
-    )
-    eval_grp.add_argument(
-        "--eval-samples",
-        type=int,
-        default=1000,
-        help="Number of samples to randomly draw from the dataset. Default: 1000",
-    )
-    eval_grp.add_argument(
-        "--eval-split",
-        default="train",
-        help="Dataset split to use. Default: train",
-    )
-    eval_grp.add_argument(
-        "--eval-seed",
-        type=int,
-        default=42,
-        help="Random seed for sampling. Default: 42",
-    )
-
     args = parser.parse_args()
 
     if args.concurrency <= 0:
@@ -1135,9 +847,6 @@ def main() -> None:
 
     if args.requests <= 0:
         raise ValueError("--requests must be greater than 0")
-
-    if args.eval_samples <= 0:
-        raise ValueError("--eval-samples must be greater than 0")
 
     if args.use_async and args.target != "triton":
         print("--async is only supported with --target triton", file=sys.stderr)
@@ -1241,19 +950,7 @@ def main() -> None:
         pool_key = _DIRECTION_TO_POOL_KEY.get(model_name, model_name)
         texts = text_pool[pool_key]
 
-        if args.eval_dataset:
-            translate_fn = _make_fn(model_name)
-            result = run_eval(
-                translate_fn=translate_fn,
-                model_name=model_name,
-                dataset_name=args.eval_dataset,
-                n_samples=args.eval_samples,
-                split=args.eval_split,
-                seed=args.eval_seed,
-                concurrency=args.concurrency,
-                collect_translations=collect_translations,
-            )
-        elif args.use_async:
+        if args.use_async:
             mode_label = "async"
             print(
                 f"[{mode_label}] {model_name} ({backend_label}): "

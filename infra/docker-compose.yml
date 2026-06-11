@@ -3,7 +3,7 @@ name: polyglot
 services:
   triton:
     build:
-      context: services/serving/triton
+      context: inference/triton
       dockerfile: Dockerfile
       args:
         TRITON_VERSION: ${TRITON_VERSION:-24.12-py3}
@@ -17,8 +17,8 @@ services:
       HF_MODEL_EN_VI: ${HF_MODEL_EN_VI:-Helsinki-NLP/opus-mt-en-vi}
       HF_MODEL_VI_EN: ${HF_MODEL_VI_EN:-Helsinki-NLP/opus-mt-vi-en}
     volumes:
-      - ./services/serving/triton/model_repository:/models
-      - ./services/serving/triton/scripts:/workspace/scripts
+      - ./inference/triton/model_repository:/models
+      - ./inference/triton/scripts:/workspace/scripts
       - hf-cache:/root/.cache/huggingface
     ports:
       - "8000:8000"   # HTTP / REST inference
@@ -98,7 +98,7 @@ services:
 
   api:
     build:
-      context: services/gateway
+      context: apps/api
       dockerfile: Dockerfile
     image: polyglot/app:local
     # No host port binding — traffic enters via Traefik on port 80.
@@ -138,20 +138,25 @@ services:
 
   worker:
     build:
-      context: services/gateway
+      context: apps/api
       dockerfile: Dockerfile
     image: polyglot/app:local
     ports:
       - "9091:9091"   # Prometheus metrics
     environment:
+      # BACKENDS env var takes highest priority over configs/models.yaml.
+      # Remove or comment it out to let the worker read from the YAML file.
       BACKENDS: >-
         {"en-vi":{"type":"triton","url":"triton:8000","model_name":"translator_en_vi"},
          "vi-en":{"type":"triton","url":"triton:8000","model_name":"translator_vi_en"},
          "llm":{"type":"vllm","url":"vllm:8000","model_name":"Qwen/Qwen3.5-0.8B"}}
+      BACKENDS_CONFIG: /app/configs/models.yaml
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       PROMETHEUS_MULTIPROC_DIR: /tmp/prom_multiproc
+    volumes:
+      - ./configs/models.yaml:/app/configs/models.yaml:ro
     command:
       - celery
       - -A
@@ -176,7 +181,7 @@ services:
 
   ui:
     build:
-      context: services/ui
+      context: apps/ui
       dockerfile: Dockerfile
     image: polyglot/ui:local
     # No host port binding — served at http://localhost/ via Traefik.
@@ -238,6 +243,25 @@ services:
       timeout: 10s
       retries: 20
       start_period: 180s
+
+  # ── Custom inference service example ─────────────────────────────────────
+  # Uncomment this block and add it to the worker's `depends_on` list
+  # to enable a custom inference backend. See inference/custom/example_service/
+  # for the implementation contract and README.
+  #
+  # custom-service:
+  #   build:
+  #     context: inference/custom/example_service
+  #     dockerfile: Dockerfile
+  #   image: polyglot/custom-service:local
+  #   ports:
+  #     - "9000:9000"
+  #   healthcheck:
+  #     test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/health')"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #     start_period: 10s
 
   node-exporter:
     image: quay.io/prometheus/node-exporter:latest
